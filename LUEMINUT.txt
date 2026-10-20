@@ -1,0 +1,34 @@
+MAX NEWTON – pelin julkaisu Netlifyssä
+======================================
+
+Kansion sisältö
+  index.html          Varsinainen peli
+  testi/index.html    Testiversio: rahasaldoa napauttamalla saa +500 €
+  LUEMINUT.txt        Tämä ohje
+
+Ensimmäinen julkaisu
+  1. Pura zip-tiedosto. Saat kansion "max-newton".
+  2. Mene osoitteeseen https://app.netlify.com/drop ja kirjaudu sisään
+     (tunnus kannattaa luoda, muuten sivu poistuu tunnin kuluttua).
+  3. Raahaa koko "max-newton"-kansio sivulle.
+  4. Netlify antaa osoitteen, esim. https://jotain-nimea.netlify.app
+     - peli:        https://jotain-nimea.netlify.app/
+     - testiversio: https://jotain-nimea.netlify.app/testi/
+  5. Halutessasi vaihda sivuston nimi: Site configuration -> Change site name.
+     Tee tämä heti alussa, ennen kuin pelaat, koska tallennus on osoitekohtainen.
+
+Uuden version päivittäminen
+  1. Lataa uusi zip ja pura se.
+  2. Avaa Netlifyssä sama sivusto -> välilehti "Deploys".
+  3. Raahaa uusi "max-newton"-kansio Deploys-sivun pudotusalueelle.
+  Osoite pysyy samana, joten tallennus säilyy.
+
+Tallennuksesta
+  - Peli tallentuu selaimeen (localStorage) sivuston osoitteen mukaan.
+    Kun päivität saman sivuston, tallennus säilyy.
+  - Tallennus häviää, jos vaihdat sivuston osoitteen, teet kokonaan uuden
+    sivuston tai tyhjennät selaimen tiedot.
+  - Jokaisella laitteella ja selaimella on oma tallennuksensa.
+  - Pelillä ja testiversiolla on eri tallennukset.
+
+3D-kirjasto (three.js) on mukana kansiossa lib/. Fontit ladataan netistä, mutta peli toimii ilman niitäkin.
