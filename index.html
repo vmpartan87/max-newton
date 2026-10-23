@@ -1,3 +1,4 @@
+<!doctype html><html lang="fi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light}body{margin:0;font:14px system-ui}[hidden]{display:none!important}</style></head><body>
 <title>Max Newton</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -8816,6 +8817,13 @@ T = '<' + 'script'
 s = s.replace(T + ' type="module">', T + '>window.MN_TEST = true;</' + 'script>\n' + T + ' type="module">', 1)
 open('papun-paja-testi.html', 'w', encoding='utf-8').write(s)
 P
+# Julkaisuversiot omalle palvelimelle (Netlify, GitHub Pages): täysi HTML-runko viewport-tageineen, muuten puhelin
+# näyttää sivun pöytäkoneen levyisenä ja pienennettynä. web/index.html = peli, web/testi/index.html = testiversio.
+mkdir -p web/testi
+for pair in "papun-paja.html:web/index.html" "papun-paja-testi.html:web/testi/index.html"; do
+  src=${pair%%:*}; dst=${pair##*:}
+  { echo '<!doctype html><html lang="fi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light}body{margin:0;font:14px system-ui}[hidden]{display:none!important}</style></head><body>'; cat "$src"; echo '</body></html>'; } > "$dst"
+done
 ==== src/tools/drive_test.py ====
 import asyncio, sys, json
 from playwright.async_api import async_playwright
@@ -8848,3 +8856,4 @@ async def run(pg, actions, logs):
             elif a.startswith('shot:'): await pg.screenshot(path=a[5:], timeout=120000)
 asyncio.run(main())
 ==== loppu ==== -->
+</body></html>
