@@ -8078,6 +8078,7 @@ function finalPost(h) {
     const px = D.S.x;
     if (px < D.dist * 0.6 && R.tg < 20) { if (S.x > px - 4) { S.x = px - 4; S.v = Math.min(S.v, D.S.v); S.vw = S.v; } }
     else if (S.x < px + 3) { S.v = Math.max(S.v, D.S.v + 14); S.vw = S.v; }   // hirmuinen loppukiri
+    else if (S.x > px + 6 && D.S.v > 5) { S.v = Math.min(S.v, D.S.v + 1); S.vw = S.v; }   // ohitus täpärästi, ei karkaa kauas
     if (px >= D.dist - 2 && S.x < D.dist) S.x = D.dist;                          // ja nenänvarrella maaliin
   }
 }
@@ -8792,6 +8793,8 @@ mummo istuu vieressä (+65 kg, `buildMummo`), maalin tilalla on kirkko (`buildCh
 vihreästä valosta. Liian aikaisin = läksytys, liian myöhään = ”saarna ehti jo loppua, senkin kuhnuri!”. Ensimmäisestä
 onnistuneesta kyydistä 2000 € (”Tässä kaksikymppinen, nuorukainen!”) ja pokaali Kirkkokyyti, sen jälkeen arvotonta tavaraa
 (`state.mummo`). Testit: `tools/t10.py`, `tools/t11.py`, kuvagalleria `tools/cgal.py`.
+Julkaisu omalle palvelimelle: build.sh tekee myös `web/index.html` ja `web/testi/index.html`, joissa on täysi HTML-runko
+(doctype, charset, viewport). Ilman viewport-tagia puhelin näytti sivun 980 px leveänä ja pienennettynä.
 ==== src/build.sh ====
 #!/bin/bash
 # Kokoaa pelin yhdeksi sivuksi. Lähdetiedostot erotellaan merkinnöillä "==== src/<nimi> ====",
