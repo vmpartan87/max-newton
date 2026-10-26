@@ -4336,7 +4336,7 @@ function exitDrive(msg) {
   D.on = false; clearTimeout(D.resT); D.resT = null;
   raceClear();
   if (car3d?.body?.userData.driver) { car3d.body.remove(car3d.body.userData.driver); car3d.body.userData.driver = null; }
-  D.mummo = false; mummoSeat(); churchShow(false);
+  D.mummo = false; D.rohvAsked = false; mummoSeat(); churchShow(false);
   engineSound.stop(true); squeal.stop();
   track.visible = false; garage.visible = true;
   scene.background = _saved.bg; scene.fog = _saved.fog; camera.near = _saved.near; camera.far = _saved.far;
@@ -6240,13 +6240,14 @@ function slotTopTier(slot) { const T = TIERS(); let m = -1; for (const i of stat
 function canBuyTier(id) { return TIERS()[id] <= famTopTier(id) + 2; }
 function shopCards(cat) {
   if (!state.shop) return '';
-  return Object.entries(PARTS).filter(([id, d]) => d.cat === cat && !owned(id) && !d.noShop).sort((a, b) => TIERS()[a[0]] - TIERS()[b[0]] || a[1].price - b[1].price).map(([id, d]) => {
+  return Object.entries(PARTS).filter(([id, d]) => d.cat === cat && !owned(id) && (!d.noShop || d.shopIf?.())).sort((a, b) => TIERS()[a[0]] - TIERS()[b[0]] || a[1].price - b[1].price).map(([id, d]) => {
     const ok = canBuyTier(id);
-    return `<button class="card shop${ok ? '' : ' locked'}" data-buy="${id}" aria-label="${esc(ok ? d.name : 'Lukittu osa')}"><img src="${THUMBS[id] || ''}" alt=""><span class="nm">${esc(ok ? d.name : '???')}</span><span class="st">${ok ? cardStat({id, cond:1}) : 'lukittu'}</span><span class="price">${ok ? d.price + ' €' : '??? €'}</span></button>`;
+    return `<button class="card shop${ok ? '' : ' locked'}" data-buy="${id}" aria-label="${esc(ok ? d.name : 'Lukittu osa')}"><img src="${THUMBS[id] || ''}" alt=""><span class="nm">${esc(ok ? d.name : '???')}</span><span class="st">${ok ? cardStat({id, cond:1}) : 'lukittu'}</span><span class="price">${ok ? (d.shopPrice ?? d.price) + ' €' : '??? €'}</span></button>`;
   }).join('');
 }
 function openShopSheet(id) {
   guideOnce('kauppa');
+  if (PARTS[id].shopSheet) return PARTS[id].shopSheet();  // esim. Rohvessorin lisäaine: oma kohtaus
   const d = PARTS[id], ok = canBuyTier(id);
   if (!ok) { openSheet(`<h2>???</h2><div class="sub">${esc(SLOT_NAME[d.slot])} · lukittu</div><p>Tämä osa on vielä liian kova. Osta ensin parempia ${esc(SLOT_NAME[d.slot].toLowerCase())}-osia – kauppa avaa aina kaksi seuraavaa tasoa.</p><div class="row"><button class="btn pri" id="shOk">Selvä</button></div>`, r => { r.querySelector('#shOk').onclick = closeSheet; }); return; }
   const afford = state.money >= d.price;
@@ -7999,7 +8000,34 @@ const ROHV_AGAIN = [
   ['Ka, sinä taas. Minä taas. Sattumaa? Ei. Kohtalo. Ja keksintö. Sanotaanko kymppitonnilla… ei ku vitosella!'],
   ['Mittee sinä minuun noin kahot? Minä oon tieteen asialla. Kansallis-Osake-Pankki uskoi minuun. Ja kato mihin se joutu. Viis tonnia ja keksintö on sinun.'],
 ];
+// Max vei auton ja sen mukana salaisen lisäaineen: Rohvessori tulee myymään varapullon (first === 'lost')
+const ROHV_LOST = [
+  {narr:true, t:'Kun olet lähdössä Maxin puheille, nurkan takaa kurkistaa tuttu resuinen hahmo. Kainalossa on taas ruskea paperipussi.'},
+  'Ka, päevee! Kuulin, että Max Newton vei sinulta auton. Ja keksinnön! Se roisto. Keksintö oli minun… tai siis sinun… tai no, nyt se on Maxin.',
+  'Ilman sitä et Maxia voita, se on tieteellinen fakta. Melkein. Onneksi rohvessorilla on aina varapullo – puistokemian laboratorio tuottaa.',
+  'Sama hinta kuin ennenkin: kymppitonni. Niin se oli, ihan varmasti. Ystävähinta. Halavalla ei lähe, vaikka kuinka kahot.',
+];
+const ROHV_PRICE2 = 10000;  // uusintaostot: "sama hinta kuin ennenkin" – Rohvessorin muisti pätkii
+// Lisävarustehyllyssä myynnissä, kun Rohvessori on tavattu: napautus tuo hänet itse paikalle
+function rohvShop() {
+  closeSheet();
+  const ok = state.money >= ROHV_PRICE2;
+  showDialog({face:ROHV_FACE, ...ROHV, pages:[
+    {narr:true, t:'Tuskin ehdit koskea hyllyn pulloon, kun Rohvessori pölähtää jostain tallin nurkan takaa.'},
+    'Ka, päevee! Eikö ollukkii hyvvee ainetta? Pähkinäinen maku, minun mielestä.',
+    'Mihin tarkotukseen minä sen alun perin kehitinkää… tuota… en minä enää muista. Jotain tieteellistä se oli. Tai sitten se oli juomaksi.',
+    'Hinta on sama ku ennenkii: kymppitonni. Niin se oli. Ihan varmasti.',
+  ], choices:[
+    {label:ok ? 'Osta 10 000 €' : 'Rahat eivät riitä (10 000 €)', cls:'pri', disabled:!ok, fn:() => rohvBuy(null, true)},
+    {label:'En osta', fn:() => showDialog({face:ROHV_FACE, ...ROHV, pages:['Ka, ei se mittään. Pullo odottaa. Minäkin odotan. Puistossa.']})},
+  ]});
+}
+Object.assign(PARTS.add_prof, {shopIf:() => !!state.rohv, shopPrice:ROHV_PRICE2, shopSheet:rohvShop});
 function rohvessori(first, after) {
+  if (first === 'lost') return showDialog({face:ROHV_FACE, ...ROHV, pages:ROHV_LOST.slice(), choices:[
+    {label:state.money >= ROHV_PRICE2 ? 'Osta 10 000 €' : 'Rahat eivät riitä (10 000 €)', cls:'pri', disabled:state.money < ROHV_PRICE2, fn:() => rohvBuy(after, true)},
+    {label:'En osta nyt', fn:() => showDialog({face:ROHV_FACE, ...ROHV, pages:['Ka, ei se mittään. Minä pyörin täällä tallin nurkilla. Kun rahat riittää, tiedät mistä minut löytää.'], done:after})},
+  ]});
   const pages = first ? [
     {narr:true, t:'Dragster-cupin alkajaisiksi puheillesi tulee vähän resuisen näköinen ukkeli. Takki on nähnyt parempia päiviä, ja kainalossa on ruskea paperipussi.'},
     'Ka, päevee. Minä oon rohvessori. Tuota… oekeestaan entinen kemian lisensiaatti. Nykyään puistokemisti.',
@@ -8013,10 +8041,15 @@ function rohvessori(first, after) {
     {label:'En osta', fn:() => { state.rohv = 'refused'; save(); showDialog({face:ROHV_FACE, ...ROHV, pages:['Ka, ei se mittään. Kyllä sinä vielä tuut kysymään. Ne kaikki tulloo.'], done:after}); }},
   ]});
 }
-function rohvBuy(after) {
-  if (state.money < 5000) return;
-  state.money -= 5000; renderMoney(); state.rohv = 'bought'; state.inv.push(newInst('add_prof')); save(); renderAll();
+function rohvBuy(after, again) {
+  const price = again ? ROHV_PRICE2 : 5000;
+  if (state.money < price) return;
+  state.money -= price; renderMoney(); state.rohv = 'bought'; state.inv.push(newInst('add_prof')); save(); renderAll();
   crazyLaugh();
+  if (again) return showDialog({face:ROHV_FACE, ...ROHV, pages:[
+    {narr:true, t:'Rohvessori nappaa rahat ja nauraa sitä samaa hullua naurua. Pullo on tällä kertaa melkein täysi. Melkein.'},
+    {narr:true, t:'Salainen lisäaine on taas hyllyssä. Asenna se auton tankin kylkeen ennen kuin haastat Maxin.'},
+  ], done:after});
   showDialog({face:ROHV_FACE, ...ROHV, pages:[
     {narr:true, t:'Rohvessori nappaa rahat, nauraa hullua naurua ja hoipertelee tiehensä.'},
     {narr:true, t:'Nostat ruskeasta paperipussista puoliksi juodun pullon ja ihmettelet, että tästähän Rohvessori naukkaili vielä hetki sitten. Uskot tulleesi huijatuksi, mutta ajattelet kokeilla ainetta myöhemmin.'},
@@ -8053,6 +8086,8 @@ function finalSheet() {
     'Voittaja saa häviäjän auton. Sinun autosi minulle tai minun autoni sinulle. Lähdetkö leikkiin?',
   ], choices:[{label:'Kisataan ▸', cls:'pri', fn:() => startFinal('surge')}, {label:'Menen kotiin kasvamaan', fn:() => showDialog({face:MAX_FACE, ...MAX, pages:['Viisas valinta… tai pelkurin. Tule takaisin, kun olet kasvanut.']})}]});
   const kupla = state.car.chassis && inst(state.car.chassis).id === 'kupla';
+  // auton mukana mennyt salainen lisäaine: Rohvessori tarjoaa uutta kerran käyntiä kohden (DRV.rohvAsked nollautuu pajaan palatessa)
+  if (st === 3 && !owned('add_prof') && !DRV.rohvAsked) { DRV.rohvAsked = true; return rohvessori('lost', finalSheet); }
   if (st === 3) return showDialog({face:MAX_FACE, ...MAX, pages:[
     ...(kupla ? [{narr:true, t:'Max katsoo autoasi pitkään ja rypistää otsaansa. ”Tuo muoto… jostain hyvin tuttu”, hän mutisee.'}] : []),
     'Tulit takaisin. Ja uudella autolla! En enää huoli autoasi – minulla on jo sellainen. Nyt ajetaan kunniasta.',
@@ -8795,6 +8830,11 @@ onnistuneesta kyydistä 2000 € (”Tässä kaksikymppinen, nuorukainen!”) ja
 (`state.mummo`). Testit: `tools/t10.py`, `tools/t11.py`, kuvagalleria `tools/cgal.py`.
 Julkaisu omalle palvelimelle: build.sh tekee myös `web/index.html` ja `web/testi/index.html`, joissa on täysi HTML-runko
 (doctype, charset, viewport). Ilman viewport-tagia puhelin näytti sivun 980 px leveänä ja pienennettynä.
+Salainen lisäaine Maxille hävityn auton jälkeen: jos `maxStage` on 3 eikä hyllyssä ole `add_prof`-pulloa, Rohvessori tulee
+Maxin puheille mennessä myymään varapullon (5 000 €, `rohvessori('lost')`). Kysytään kerran pajakäyntiä kohden (`DRV.rohvAsked`).
+Salainen lisäaine on myynnissä lisävarustehyllyssä, kun Rohvessori on tavattu (`PARTS.add_prof.shopIf/shopPrice/shopSheet`).
+Napautus tuo Rohvessorin paikalle (`rohvShop`): ”pähkinäinen maku”, ei muista keksinnön tarkoitusta, ”sama hinta kuin ennenkin:
+kymppitonni”. Uusintaostot maksavat 10 000 € (`ROHV_PRICE2`), myös Maxille menetetyn pullon tilalle; ensimmäinen osto 5 000 €.
 ==== src/build.sh ====
 #!/bin/bash
 # Kokoaa pelin yhdeksi sivuksi. Lähdetiedostot erotellaan merkinnöillä "==== src/<nimi> ====",
