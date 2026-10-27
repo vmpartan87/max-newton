@@ -1919,6 +1919,9 @@ function loadState() {
         if (eI && tI && !PARTS[eI.id].electric && (PARTS[eI.id].lay === 'd') !== !!PARTS[tI.id].dieselOnly) s.car.turbo = null; }
       // Maxin voittaneet saavat hänen 8.2 V8 -moottorinsa
       if ((s.maxStage === 'done' || s.inv.some(i => i.id === 'maxtf')) && !s.inv.some(i => i.id === 'e82')) s.inv.push(newInst('e82'));
+      // demo 30: vahvistus siirtyy autossa olevan vaihteiston sisään
+      if (s.car.gbplus) { const b = s.inv.find(i => i.uid === s.car.gbplus), gI = s.inv.find(i => i.uid === s.car.gearbox);
+        if (b && gI && !gI.plus) { gI.plus = b.id; s.inv = s.inv.filter(i => i !== b); } s.car.gbplus = null; }
       // demo 28: Top Fueliin ei lisäsiipeä eikä valoja
       if (chI && PARTS[chI.id]?.noSlots) for (const k of Object.keys(PARTS[chI.id].noSlots)) s.car[k] = null;
       if (chI?.id !== 'rekku' && enI?.id === 'tank200') { let t = s.inv.find(i => i.id === 'tank10'); s.car.energy = t ? t.uid : null; }
@@ -1979,14 +1982,17 @@ function carPhys(car = state.car, fuel = state.fuel) {
   let grip = (wh.grip + (P('spoiler') ? 0.08 : 0)) * gripOf(ch.id);
   const ad = P('additive') && P('additive').wearMul && ener?.kind === 'tank' ? P('additive') : null;
   if (P('glue') && wh.id === 'w_dragster') grip *= P('glue').gripMul;  // ihmeliima: pito ×2, vain dragsterin renkailla
-  return {m, cda:(ch.cda || 0.8) + (P('spoiler') ? 0.05 : 0) + (P('lights') ? 0.08 : 0), crr:wh.offroad ? 0.025 : 0.015,
+  // demo 31: radan pinta (jää, muta) heikentää pitoa ja lisää vierintävastusta cupin mukaan (ks. SURFACES)
+  const sf = typeof surfaceOf === 'function' ? surfaceOf() : null;
+  if (sf) grip *= sf.gripK(wh, ch);
+  return {m, cda:(ch.cda || 0.8) + (P('spoiler') ? 0.05 : 0) + (P('lights') ? 0.08 : 0), crr:sf ? sf.crr(wh, ch) : wh.offroad ? 0.025 : 0.015, slipK:sf ? sf.slipK : 0.82, surface:sf ? sf.id : null,
     grip, gripF:grip * m * G9 * 0.62, brakeF:m * 8.5 * Math.min(1.2, grip), en, electric:!!en.electric, race,
     hpBase:en.hp * fuelK * exBonus * condK, boostSet:tu ? (tu.adjustable ? I('turbo').boost : tu.maxBoost) : 0,
     s0:tu?.s0 ?? 0.3, s1:tu?.s1 ?? 0.6, lag:tu?.lag ?? 0.5, maxRpm:en.maxRpm, limit, idle:en.electric ? 0 : 850, launch:limit * 0.5,
     resp:(RESP_P[en.snd] || 2.5) * (race ? 1.7 : 1), Ie:en.electric ? 0.05 : 0.08 + engDisp(en) * 0.035,
     dur:en.dur * (race ? 0.8 : 1) * (PISTONS[eI.pistons]?.mul || 1),
     ...(en.electric ? {gb:null, ratios:[1], nG:1, shiftT:0.03, gbRating:Infinity, kTop:95 / en.maxRpm * (P('ratio')?.ratioMul || 1), top6000:0}
-      : {gb, ratios:gb.ratios, nG:gb.gears, shiftT:Math.max(0.03, gb.shift), gbRating:gb.rating * (P('gbplus')?.gbMul || 1) * (gI.cond <= 0 ? 0 : 1), kTop:gbTop({id:gI.id, gpct:Math.min(gI.gpct || 100, gbMaxPct(en))}) / 3.6 / 6000 * (P('ratio')?.ratioMul || 1), top6000:gbTop({id:gI.id, gpct:Math.min(gI.gpct || 100, gbMaxPct(en))}) * (P('ratio')?.ratioMul || 1)}),
+      : {gb, ratios:gb.ratios, nG:gb.gears, shiftT:Math.max(0.03, gb.shift), gbRating:gb.rating * gbMulOf(car) * (gI.cond <= 0 ? 0 : 1), kTop:gbTop({id:gI.id, gpct:Math.min(gI.gpct || 100, gbMaxPct(en))}) / 3.6 / 6000 * (P('ratio')?.ratioMul || 1), top6000:gbTop({id:gI.id, gpct:Math.min(gI.gpct || 100, gbMaxPct(en))}) * (P('ratio')?.ratioMul || 1)}),
     wearMul:ad ? ad.wearMul : 1, noBoom:!!ad?.noBoom, dead:eI.cond <= 0, gbDead:!!gI && gI.cond <= 0};
 }
 const kGear = (P, g) => P.kTop * P.ratios[P.nG - 1] / P.ratios[g - 1];
@@ -2044,7 +2050,7 @@ function physStep(S, P, inp, dt) {
     }
     if (S.slip) {
       S.gripUse = 1;
-      const Fs = P.gripF * 0.82;
+      const Fs = P.gripF * (P.slipK ?? 0.82);  // sutiessa pito putoaa (jäällä ja mudassa enemmän)
       S.v = Math.max(0, v + (Fs - Fres - brake) / P.m * dt);
       S.vw += (F - Fs) / (me + mw + 15) * dt;
       if (S.vw <= S.v) { S.vw = S.v; S.slip = false; }
@@ -2058,7 +2064,7 @@ function physStep(S, P, inp, dt) {
 // Täydellinen kiihdytys simulaattorilla: 0–100, 200 m, 400 m, 1000 m ja huippunopeus
 const _simCache = new Map();
 function simulate(P) {
-  const key = JSON.stringify([P.m, P.cda, P.grip, P.hpBase, P.boostSet, P.en.id, P.limit, P.top6000, P.gb?.id, P.dead]);
+  const key = JSON.stringify([P.m, P.cda, P.grip, P.crr, P.slipK, P.hpBase, P.boostSet, P.en.id, P.limit, P.top6000, P.gb?.id, P.dead]);
   if (_simCache.has(key)) return _simCache.get(key);
   const S = newRunState(P), dt = 0.02, r = {t100:null, t200:null, t400:null, t1000:null, vmax:0, slipT:0};
   S.gear = 1; let t = 0;  // sähköautolla gear pysyy 1:nä (suora veto)
@@ -2074,6 +2080,12 @@ function simulate(P) {
   if (_simCache.size > 200) _simCache.clear();
   _simCache.set(key, r);
   return r;
+}
+// Demo 30: vaihteiston vahvistus kuuluu sille vaihteistolle, johon se on asennettu (gearbox-instanssin plus = osan id).
+// Vastustajien autoissa vahvistus on yhä omassa paikassaan (car.gbplus).
+function gbMulOf(car) {
+  const gI = car.gearbox && inst(car.gearbox), id = gI?.plus || (car.gbplus && inst(car.gbplus)?.id);
+  return id ? PARTS[id]?.gbMul || 1.3 : 1;
 }
 function compute(car = state.car, fuel = state.fuel) {
   const I = s => (car[s] ? inst(car[s]) : null);
@@ -2128,7 +2140,7 @@ function compute(car = state.car, fuel = state.fuel) {
   const [lo, hi] = [0.95, 1.05];
   const hpShown = hpKnown ? Math.round(hp) : Math.round(hp * (lo + (hi - lo) * keyHash(dkey)) / 5) * 5;
   return {dkey, hpKnown, hpShown, exK, exBonus, spin, spinHp, additive:ad, wearMul: ad ? ad.wearMul : 1, noBoom: !!ad?.noBoom, weight:Math.round(weight), hp:Math.round(hp), dur, load, boost, race,
-    squish:0, grip, accel, vmax, sim, gb:en?.electric ? null : gb, gbLoad: gb && !en?.electric ? hp / (gb.rating * (P('gbplus')?.gbMul || 1)) : 0, gbRating: gb ? Math.round(gb.rating * (P('gbplus')?.gbMul || 1)) : 0, gbCond: gI ? gI.cond : 0,
+    squish:0, grip, accel, vmax, sim, gb:en?.electric ? null : gb, gbLoad: gb && !en?.electric ? hp / (gb.rating * gbMulOf(car)) : 0, gbRating: gb ? Math.round(gb.rating * gbMulOf(car)) : 0, gbCond: gI ? gI.cond : 0,
     checks, valid: checks.every(c => c.ok), en, ch, wh, engCond: eI ? eI.cond : 0};
 }
 // Kuluminen sekunnissa (osuus kunnosta) täydellä kaasulla
@@ -2352,7 +2364,7 @@ function puff(pos, o = {}) {
   if (fx.length > 260) return;
   const m = new THREE.SpriteMaterial({map:puffTex, color:o.color ?? 0xdddddd, transparent:true, opacity:o.op ?? 0.5, depthWrite:false, blending:o.add ? THREE.AdditiveBlending : THREE.NormalBlending});
   const s = new THREE.Sprite(m); s.position.copy(pos); s.scale.setScalar(o.size ?? 0.3); scene.add(s);
-  fx.push({s, v:o.v ? o.v.clone() : new THREE.Vector3(0, 0.6, 0), life:0, max:o.life ?? 1.2, grow:o.grow ?? 1.4, op:o.op ?? 0.5, drag:o.drag ?? 0.8, size:o.size ?? 0.3});
+  fx.push({s, v:o.v ? o.v.clone() : new THREE.Vector3(0, 0.6, 0), life:0, max:o.life ?? 1.2, grow:o.grow ?? 1.4, op:o.op ?? 0.5, drag:o.drag ?? 0.8, size:o.size ?? 0.3, g:o.g || 0});
 }
 const debris = [];
 function spawnDebris(pos, n) {
@@ -2367,6 +2379,7 @@ function updateFx(dt) {
     const p = fx[i]; p.life += dt;
     const k = p.life / p.max;
     if (k >= 1) { scene.remove(p.s); p.s.material.dispose(); fx.splice(i, 1); continue; }
+    if (p.g) { p.v.y -= p.g * dt; if (p.s.position.y < 0.03 && p.v.y < 0) { p.life = p.max; } }  // painovoima: roiske katoaa maahan osuessaan
     p.s.position.addScaledVector(p.v, dt); p.v.multiplyScalar(Math.max(0, 1 - dt * p.drag));
     p.s.scale.setScalar(p.size * (1 + k * p.grow));
     p.s.material.opacity = p.op * (1 - k) * Math.min(1, p.life * 8);
@@ -2756,8 +2769,8 @@ function assemble(car = state.car, o = {}) {
     if (parts.engine) { root.updateMatrixWorld(true); const bx = new THREE.Box3().setFromObject(parts.engine); gx = sgn > 0 ? bx.min.x - 0.2 : bx.max.x + 0.2; }
     gg.position.set(gx, ep[1] + 0.12, 0); if (sgn < 0) gg.rotation.y = Math.PI;
     body.add(gg); parts.gearbox = gg; tag(gg, 'gearbox');
-    const bI = car.gbplus && inst(car.gbplus);
-    if (bI) { const cg = buildPartModel(bI.id); cg.position.set(gx - sgn * 0.05, ep[1] + 0.12, 0.2); body.add(cg); parts.gbplus = cg; tag(cg, 'gbplus'); }
+    const bId = gI.plus || (car.gbplus && inst(car.gbplus)?.id);
+    if (bId) { const cg = buildPartModel(bId); cg.position.set(gx - sgn * 0.05, ep[1] + 0.12, 0.2); body.add(cg); parts.gbplus = cg; tag(cg, 'gbplus'); }
     const rI = car.ratio && inst(car.ratio);
     if (rI) { const rg = buildPartModel(rI.id); rg.position.set(gx - sgn * 0.05, ep[1] + 0.12, -0.2); body.add(rg); parts.ratio = rg; tag(rg, 'ratio'); }
   }
@@ -2938,7 +2951,7 @@ function cardStat(i) {
     case 'chassis': return `${d.weight} kg · tila ${i.cut ? bayOf(i) + ' ✂' : d.bay}`;
     case 'engine': return d.electric ? `${d.hp} hv · sähkö` : `${d.hp} hv · koko ${d.size}`;
     case 'turbo': return `${d.maxBoost} bar${d.adjustable ? ' · säätö' : ''}`;
-    case 'gearbox': return `${d.gears} vaihdetta · ${d.rating} hv`;
+    case 'gearbox': return `${d.gears} vaihdetta · ${Math.round(d.rating * (i.plus ? PARTS[i.plus].gbMul || 1.3 : 1))} hv${i.plus ? ' · vahvistettu' : ''}`;
     case 'gbplus': return d.gbMul ? `vaihteisto +${Math.round((d.gbMul - 1) * 100)} %` : 'vaihteisto +30 %';
     case 'ratio': return 'välitys ×1,5';
     case 'tool': return 'konetila +1 koko';
@@ -3078,6 +3091,7 @@ function renderInfo(previewCar) {
       ${stat('Huippu', st.vmax ? st.vmax + ' km/h' : '–', delta(st.vmax, pv?.vmax, false))}
       ${stat('200 m', runOf(st).t200 ? fmt1(runOf(st).t200) + ' s' : '–', '')}
       ${stat('400 m', runOf(st).t400 ? fmt1(runOf(st).t400) + ' s' : '–', '')}
+      ${st.ch ? stat('Arvo (listahinnat)', carValue().toLocaleString('fi-FI') + ' €', '') : ''}
     </div>
     ${st.en ? `<div class="meter"><div class="lbl"><span>Kuormitus täysillä</span><b style="color:${ZONE_COL[zone]}">${ZONE_TXT[zone]}</b></div>${loadBarHTML(pv && pv.en ? pv.load : st.load)}</div>` : ''}
     ${st.wh ? `<div class="meter"><div class="lbl"><span>Renkaiden pito</span><b style="color:${st.spin ? '#ffcf7a' : '#9be3ae'}">${Math.round(st.grip * 100)} %${st.spin ? ' – sutii!' : ''}</b></div><div class="bar"><div class="fill" style="width:${Math.min(100, st.grip / 3.6 * 100)}%;background:${st.spin ? 'var(--amber)' : 'var(--green)'}"></div></div>${st.spin ? '<div class="lbl" style="margin-top:3px;text-transform:none;letter-spacing:0"><span>Teho riittäisi parempaan kiihtyvyyteen – renkaat sutivat. Kokeile pitävämpiä renkaita.</span></div>' : ''}</div>` : ''}
@@ -3191,6 +3205,16 @@ function renderMoney() { $('money').textContent = state.money + ' €'; }
 function renderAll() { renderShelf(); renderInfo(); renderMoney(); }
 
 /* ---------- Asennus ja irrotus ---------- */
+// Vahvistus asennetaan pysyvästi autossa olevan vaihteiston sisään: osa kuluu, ja vahvistus kulkee vaihteiston mukana.
+// Toiseen vaihteistoon tarvitaan oma vahvistus. Parempi vahvistus korvaa heikomman.
+function installGbPlus(i, d) {
+  const gI = inst(state.car.gearbox), g = PARTS[gI.id], old = gI.plus && PARTS[gI.plus];
+  if (old && (old.gbMul || 1.3) >= (d.gbMul || 1.3)) { toast(`${g.name} on jo vahvistettu (${old.name}).`, 'bad'); sfx.nope(); return false; }
+  state.inv = state.inv.filter(x => x.uid !== i.uid); gI.plus = i.id;
+  save(); rebuildCar('gearbox'); renderAll(); sfx.cash();
+  toast(`${d.name} asennettiin vaihteistoon ${g.name}${old ? ` (korvasi: ${old.name})` : ''}. Se pysyy tässä vaihteistossa – muihin vaihteistoihin tarvitaan oma vahvistus.`, 'good');
+  return true;
+}
 function tryInstall(uid) {
   if (dyno.on) { toast('Palaa ensin pajaan, niin voit vaihtaa osia.'); return false; }
   // Rälläkkä: napautus tai raahaus autoon avaa leikkauksen
@@ -3201,6 +3225,7 @@ function tryInstall(uid) {
   const c = canInstall(uid);
   if (!c.ok) { toast(c.msg, 'bad'); sfx.nope(); return false; }
   const i = inst(uid), d = PARTS[i.id], slot = d.slot;
+  if (slot === 'gbplus') return installGbPlus(i, d);
   const msgs = [];
   if (state.car[slot]) {
     if (slot === 'chassis') { if (car3d?.root) flyRoot(); }
@@ -3445,15 +3470,18 @@ function bindGearSlider(root, i) {
 
 /* ---------- Purkaamo ---------- */
 function genJunk() {
-  // Romu-Rane: enintään yhtä pykälää parempia kuin oma paras osa samaa lajia; halvat kämäset ovat yleisiä, huippuosat harvinaisia.
+  // Romu-Rane: enintään yhtä pykälää parempia kuin oma paras osa samaa lajia, eli tarjonta paranee sitä mukaa kun osia kertyy.
   // Kasassa voi olla myös osia, jotka sinulla jo on. Kuntoa ei näe ennen ostoa, ja noin joka neljäs osa on rikki.
   const ids = Object.keys(PARTS).filter(id => !['additive', 'tool'].includes(PARTS[id].slot) && !PARTS[id].noShop && TIERS()[id] <= famTopTier(id) + 1 && (PARTS[id].slot !== 'chassis' || Math.random() < 0.3));
-  const w = ids.map(id => Math.pow(0.5, TIERS()[id]) / Math.sqrt(1 + PARTS[id].price / 200));
+  // Demo 30: tasaisempi valikoima. Paino oman parhaan osan tason mukaan: yhtä pykälää parempi 0,8, oman tason
+  // ympäristö 1, kaksi pykälää huonompi 0,55, vielä huonommat 0,3. Sama osalaji arvotaan harvemmin kahdesti (vaihtelua).
+  const T = TIERS(), w = ids.map(id => { const d = famTopTier(id) - T[id]; return d < 0 ? 0.8 : d <= 1 ? 1 : d === 2 ? 0.55 : 0.3; });
   const out = [];
   for (let k = 0; k < 4 && ids.length; k++) {
     let r = Math.random() * w.reduce((a, b) => a + b, 0), n = 0;
     while (n < ids.length - 1 && (r -= w[n]) > 0) n++;
     const id = ids.splice(n, 1)[0]; w.splice(n, 1);
+    ids.forEach((x, i) => { if (PARTS[x].slot === PARTS[id].slot) w[i] *= 0.25; });
     const cond = Math.random() < 0.25 ? 0 : Math.round(rnd(0.3, 0.9) * 100) / 100;
     out.push({id, cond, price:Math.max(5, Math.round(PARTS[id].price * rnd(0.15, 0.3) / 5) * 5)});
   }
@@ -3486,7 +3514,7 @@ function openJunk() {
 
 /* ---------- Valikko & Papu ---------- */
 function openMenu() {
-  openSheet(`<h2>Valikko</h2><div class="sub">Max Newton · demo 29 · ${state.shop ? 'oikea peli (osat ostetaan)' : 'testipeli (hylly täynnä)'}</div>
+  openSheet(`<h2>Valikko</h2><div class="sub">Max Newton · demo 32 · ${state.shop ? 'oikea peli (osat ostetaan)' : 'testipeli (hylly täynnä)'}</div>
     <div class="sub" style="margin-top:8px">Kuljettajan nimi</div>
     <div class="nameRow"><input id="mName" type="text" maxlength="20" autocomplete="off" spellcheck="false" value="${esc(playerName())}" aria-label="Kuljettajan nimi"><button class="btn pri" id="mNameOk">Tallenna</button></div>
     <div class="sub" style="margin-top:8px">Vaikeustaso</div>
@@ -4332,6 +4360,7 @@ function enterDrive() {
 }
 function exitDrive(msg) {
   const D = DRV; if (!D.on) return;
+  if (typeof rallyStop === 'function') rallyStop();
   if (D.phase !== 'menu') autoRepair();
   D.on = false; clearTimeout(D.resT); D.resT = null;
   raceClear();
@@ -4474,6 +4503,7 @@ function updateDrive(dt, now) {
   const D = DRV;
   if (!D || !D.on) return false;
   if (!car3d?.def || !D.S) return true;
+  if (RALLY?.on) return updateRally(dt, now);  // rallimoodi: oma silmukka
   D.t += dt;
   const S = D.S, K = D.keys, sheet = !$('sheetWrap').hidden;
   // fysiikan arvot päivittyvät, kun kunto muuttuu
@@ -4572,7 +4602,8 @@ function updateDrive(dt, now) {
   squeal.set(S.slip ? 0.35 + slipK * 0.65 : 0);
   if (S.slip && navigator.vibrate && now - D.vibT > 140) { D.vibT = now; try { navigator.vibrate(40); } catch (e) {} }
   // savut
-  if (S.slip) { D.smokeAcc += dt * (5 + slipK * 12); while (D.smokeAcc > 1) { D.smokeAcc -= 1; tireSmoke(slipK); } }
+  if (S.slip || (P.surface === 'mud' && S.v > 1)) { D.smokeAcc += dt * (S.slip ? 5 + slipK * 12 : P.surface === 'mud' ? 18 : 4); while (D.smokeAcc > 1) { D.smokeAcc -= 1; tireSmoke(slipK); } }
+  if (P.surface === 'mud') mudTint(car3d.root, D, S, dt);
   // diesel puskee mustaa savua, sitä enemmän mitä enemmän tehoa
   const dsl = P.en.lay === 'd', dk = dsl ? clamp((D.st?.hp || 300) / 300, 0.6, 6) : 1;
   if (!P.electric && !P.dead) { D.exAcc = (D.exAcc || 0) + dt * (2 + D.thr * 10 * dk); while (D.exAcc > 1) { D.exAcc -= 1; if (dsl) exhaustFx(0.3 + D.thr * 0.5, D.thr > 0.3 ? 0x101010 : 0x3a3a3a, false, 1 + D.thr * Math.min(2.5, dk * 0.4)); else exhaustFx(0.12 + D.thr * 0.2, S.L > 1.25 ? 0x2a2a2a : S.L > 1 ? 0x777777 : 0xd6d6d6); } }
@@ -4693,7 +4724,7 @@ function skidMesh(color, op) {
   const m = new THREE.InstancedMesh(g, new THREE.MeshBasicMaterial({color, transparent:true, opacity:op, depthWrite:false, polygonOffset:true, polygonOffsetFactor:-2, polygonOffsetUnits:-2}), 3000);
   m.count = 0; m.userData.n = 0; m.frustumCulled = false; m.castShadow = false; m.receiveShadow = false; m.renderOrder = 1; track.add(m); return m;
 }
-function skidInit() { if (!SKID.grey && track) { SKID.grey = skidMesh(0x23252a, 0.6); SKID.black = skidMesh(0x050505, 0.85); } }
+function skidInit() { if (!SKID.grey && track) { SKID.grey = skidMesh(0x23252a, 0.6); SKID.black = skidMesh(0x050505, 0.85); SKID.snow = skidMesh(0xcfd8e6, 0.55); SKID.mud = skidMesh(0x2e1d10, 0.8); } }
 // key = pyörän tunniste, kind = 'grey' | 'black' | null (ei jälkeä)
 function skidAt(key, wheel, width, kind) {
   skidInit(); if (!SKID.grey) return;
@@ -4707,7 +4738,8 @@ function skidAt(key, wheel, width, kind) {
 }
 function skidCar(pre, c3, S, wd) {
   if (!c3?.wheels?.length || !S) return;
-  const kind = S.v < 0.3 ? null : S.slip ? 'black' : (S.gripUse || 0) > 0.8 ? 'grey' : null;
+  const sf = (c3 === car3d ? DRV.P : RACE.P)?.surface;
+  const kind = S.v < 0.3 ? null : sf === 'ice' ? 'snow' : sf === 'mud' ? 'mud' : S.slip ? 'black' : (S.gripUse || 0) > 0.8 ? 'grey' : null;
   const rear = c3.wheels.slice(-2), w = (wd?.w || 0.22) * 0.8;
   rear.forEach((wh, k) => skidAt(pre + k, wh, w, kind));
 }
@@ -4715,6 +4747,7 @@ function tireSmoke(k) {
   const D = DRV, rear = car3d.wheels.slice(-2);
   for (const w of rear) {
     const p = new THREE.Vector3(); w.getWorldPosition(p); p.y = 0.25;
+    if (D.P.surface) { puff(p, surfacePuff(D.P.surface, D.S, p, -LANE)); continue; }
     puff(p, {color:0xeeeeee, op:0.3 + k * 0.2, size:0.4 + k * 0.25, life:1.8, grow:3 + k * 2, v:new THREE.Vector3(D.S.v * 0.5 - rnd(0.5, 2.5), rnd(0.3, 1.2), rnd(-1.2, 1.2) + (p.z - LANE) * 0.6), drag:1.1});
   }
 }
@@ -4937,7 +4970,7 @@ function updateHud(force) {
   const tt = D.tGreen == null ? 0 : (D.finishT ?? D.t) - D.tGreen;
   $('xTime').textContent = fmt3(tt);
   const tgH = RACE.on ? tgtOf() : 0, xg = $('xTgt');  // tavoiteaika-cupissa tavoite kellon viereen
-  const tgTxt = tgH ? 'tavoite ' + fmt3(tgH) : DRV.mummo ? 'kirkolle n. 30 s' : ''; if (xg.textContent !== tgTxt) { xg.textContent = tgTxt; xg.hidden = !tgTxt; }
+  const tgTxt = tgH ? 'tavoite ' + fmt3(tgH) : DRV.mummo ? 'kirkolle n. 30 s' : RALLY?.on ? `kierros ${Math.min(RALLY.lap + 1, RALLY.LAPS)}/${RALLY.LAPS}` : ''; if (xg.textContent !== tgTxt) { xg.textContent = tgTxt; xg.hidden = !tgTxt; }
   // lähtövalot myös ruudun yläreunaan takakuvassa, jotta ne näkyvät tekstien ja mittarien yli
   const tv = D.cam === 'chase' && (D.phase === 'stage' || D.phase === 'foul' || (D.phase === 'run' && D.t - D.tGreen < 2.5)), xt = $('xTree');
   if (xt.hidden === tv) xt.hidden = !tv;
@@ -5004,8 +5037,8 @@ function clutchUp() {
   window.addEventListener('keydown', e => {
     if (!DRV.on || e.repeat) { if (DRV.on && /^Arrow|Space/.test(e.code)) e.preventDefault(); return; }
     DRV.keys[e.code] = true;
-    if (e.code === 'ArrowRight' || e.code === 'KeyE') shift(1);
-    if (e.code === 'ArrowLeft' || e.code === 'KeyQ') shift(-1);
+    if (!RALLY?.on && (e.code === 'ArrowRight' || e.code === 'KeyE')) shift(1);
+    if (!RALLY?.on && (e.code === 'ArrowLeft' || e.code === 'KeyQ')) shift(-1);
     if (e.code === 'KeyC') $('dCam').click();
     if (e.code === 'KeyZ' || e.code === 'ShiftLeft') clutchDown();
     if (/^Arrow|Space/.test(e.code)) e.preventDefault();
@@ -5518,6 +5551,7 @@ function raceResetOpp() {
 }
 function raceClear() {
   const R = RACE;
+  if (typeof surfaceShow === 'function') surfaceShow(null);
   if (R.snd) { R.snd.stop(true); R.snd = null; }
   if (R.c3) { R.c3.root.parent?.remove(R.c3.root); disposeTree(R.c3.root); R.c3 = null; }
   R.on = false; R.rv = null; R.S = null; R.intro = false; R.cup = null; R.stake = null; R.final = null; R.fouled = false; R.dead = false; R.boomed = false;
@@ -5561,17 +5595,19 @@ function syncReopen() {
 }
 
 function modeSheet() {
-  raceClear(); DRV.phase = 'menu'; DRV.mummo = false; churchShow(false);
+  raceClear(); if (typeof rallyStop === 'function') rallyStop(); DRV.phase = 'menu'; DRV.mummo = false; churchShow(false);
   driveSheet(`<h2>Rata</h2><div class="sub">Mitä ajetaan?</div>
     <div class="modes">
       <button class="mode duel" id="moTest"><b>Testiajo</b><small>Aja yksin, kokeile osia ja paranna ennätyksiä · myös 1000 m lentävä</small></button>
       <button class="mode" id="moDuel"><b>Yksittäiskisa</b><small>Kaksintaistelu toista kuskia vastaan</small></button>
       <button class="mode" id="moCup"><b>Cup</b><small>Usean kuljettajan sarja: pisteet, palkintorahat ja pokaalit</small></button>
+      <button class="mode" id="moRally"><b>Ralli <small style="font-weight:600;opacity:.8">demo</small></b><small>Pieni rata, rattiohjaus ja automaattivaihteet · sora, lumi tai asfaltti</small></button>
     </div>
     <div class="row"><button class="btn" id="moHome">Takaisin pajaan</button></div>`, root => {
     root.querySelector('#moTest').onclick = () => { sfx.tick(); chooseDistSheet(); };
     root.querySelector('#moDuel').onclick = () => { sfx.tick(); RIVALS.length > 1 ? rivalListSheet() : rivalSheet(RIVALS[0]); };
     root.querySelector('#moCup').onclick = () => { sfx.tick(); cupListSheet(); };
+    root.querySelector('#moRally').onclick = () => { sfx.tick(); rallySheet(); };
     root.querySelector('#moHome').onclick = () => { closeSheet(); goHome(); };
   }, 'Kisavalikko');
 }
@@ -5579,7 +5615,7 @@ function rivalListSheet() {
   raceClear(); guideOnce('kisa');
   const singles = cupSingles();
   driveSheet(`<h2>Yksittäiskisa</h2><div class="sub">Kenet haastat?</div>
-    <div class="modes"><button class="mode rv" id="rlMummo"><span class="face">${MUMMO.face}</span><b>Aune-mummon kirkkokyyti</b><small>Rauhallinen kyyti kirkolle · 400 m · Vanha Musta${state.mummo?.rides ? ` · kyytejä ${state.mummo.rides}` : ''}</small></button>${RIVALS.map(rv => { const r = rivalRecord(rv); return `<button class="mode rv" data-rv="${rv.id}"><span class="face">${rv.face}</span><b>${esc(rv.name)} <span class="stars">${'★'.repeat(rv.level)}${'☆'.repeat(5 - rv.level)}</span></b><small>${esc(PARTS[rv.car.chassis.id].name)} · ${rv.dist} m · ${esc(rv.dialect)} · sinä ${r.w}–${r.l}</small></button>`; }).join('')}${singles.length ? `<div class="sub" style="margin:6px 0 0">Cup-tutut</div>${singles.map(rv => { const r = rivalRecord(rv); return `<button class="mode rv" data-rv="${rv.id}"><span class="face">${rv.face}</span><b>${esc(rv.name)} <span class="stars">${'★'.repeat(rv.level)}${'☆'.repeat(5 - rv.level)}</span></b><small>${esc(PARTS[rv.car.chassis.id].name)} · ${rv.dist} m · ${esc(rv.dialect)} · sinä ${r.w}–${r.l}</small></button>`; }).join('')}` : ''}<button class="mode rv locked" disabled><span class="face">${MAX_LOCKED_FACE}</span><b>Max Newton <span class="stars">★★★★★★</span></b><small>Lukittu · voita ensin kaikki cupit ja kuljettajat, niin legenda haastaa sinut</small></button></div>
+    <div class="modes"><button class="mode rv" id="rlMummo"><span class="face">${MUMMO.face}</span><b>Aune-mummon kirkkokyyti</b><small>Rauhallinen kyyti kirkolle · 400 m · Vanha Musta${state.mummo?.rides ? ` · kyytejä ${state.mummo.rides}` : ''}</small></button>${RIVALS.map(rv => { const r = rivalRecord(rv); return `<button class="mode rv" data-rv="${rv.id}"><span class="face">${rv.face}</span><b>${esc(rv.name)} <span class="stars">${'★'.repeat(rv.level)}${'☆'.repeat(5 - rv.level)}</span></b><small>${esc(PARTS[rv.car.chassis.id].name)} · ${rv.dist} m · ${esc(rv.dialect)} · sinä ${r.w}–${r.l}${r.w ? ' · kunniakisat' : ''}</small></button>`; }).join('')}${singles.length ? `<div class="sub" style="margin:6px 0 0">Cup-tutut</div>${singles.map(rv => { const r = rivalRecord(rv); return `<button class="mode rv" data-rv="${rv.id}"><span class="face">${rv.face}</span><b>${esc(rv.name)} <span class="stars">${'★'.repeat(rv.level)}${'☆'.repeat(5 - rv.level)}</span></b><small>${esc(PARTS[rv.car.chassis.id].name)} · ${rv.dist} m · ${esc(rv.dialect)} · sinä ${r.w}–${r.l}${r.w ? ' · kunniakisat' : ''}</small></button>`; }).join('')}` : ''}<button class="mode rv locked" disabled><span class="face">${MAX_LOCKED_FACE}</span><b>Max Newton <span class="stars">★★★★★★</span></b><small>Lukittu · voita ensin kaikki cupit ja kuljettajat, niin legenda haastaa sinut</small></button></div>
     <div class="row"><button class="btn" id="rlBack">← Takaisin</button></div>`, root => {
     root.querySelectorAll('[data-rv]').forEach(b => b.onclick = () => rivalSheet([...RIVALS, ...singles].find(r => r.id === b.dataset.rv)));
     root.querySelector('#rlBack').onclick = modeSheet;
@@ -5591,10 +5627,13 @@ function rivalSheet(rv) {
   raceSetup(rv);
   const R = RACE, st = R.st, d = rivalDyno(rv), car = R.car, N = s => (car[s] ? PARTS[inst(car[s]).id] : null);
   const needCh = PARTS[rv.car.chassis.id], c = carCtx(), mine = c.dyno, okDyno = !!mine;
-  const res = rv.rules.map(r => ({r, ok:r.test(c)})), okRules = res.every(x => x.ok), ok = okRules && okDyno;
-  const plain = res.filter(x => !x.r.dyno).every(x => x.ok);
-  const line = !plain ? rv.say.rules : !okDyno ? rv.say.needDyno : !okRules ? rv.say.rules : (rv._hello || sayNext(rv, 'hello'));
-  const rec = rivalRecord(rv), tb = N('turbo');
+  // Demo 30: rahaa voi voittaa kultakin kuskilta vain kerran. Sen jälkeen ajetaan kunniasta, ja tehoa saa olla enintään 10 % enemmän.
+  const rec = rivalRecord(rv), honor = rec.w > 0, hpCap = Math.round(d.peakHp * 1.1);
+  const capRule = honor ? RULE.maxHp(hpCap) : null;
+  const res = [...rv.rules, ...(capRule ? [capRule] : [])].map(r => ({r, ok:r.test(c)})), okRules = res.every(x => x.ok), ok = okRules && okDyno;
+  const plain = res.filter(x => !x.r.dyno).every(x => x.ok), capOk = !capRule || capRule.test(c);
+  const line = !plain ? rv.say.rules : !okDyno ? rv.say.needDyno : !capOk ? `Uusinta ajetaan kunniasta ja tasaväkisesti: tehoa saa olla enintään ${hpCap} hv. Säädä ahtoa pienemmälle.` : !okRules ? rv.say.rules : (rv._hello || sayNext(rv, 'hello'));
+  const tb = N('turbo');
   const chk = (good, txt) => `<li class="${good ? 'ok' : 'no'}"><i>${good ? '✓' : '✗'}</i><span>${txt}</span></li>`;
   const anyDyno = (state.dynos || []).some(d => d.key === dynoKey());
   driveSheet(`<div class="rvHead"><span class="face">${rv.face}</span><div><h2>${esc(rv.name)}</h2><div class="sub">${esc(rv.title)}</div><div class="rvRec">Kisat: sinä ${rec.w} – ${rec.l} ${esc(rv.short)}</div></div></div>
@@ -5615,13 +5654,15 @@ function rivalSheet(rv) {
     <div class="sub" style="margin:10px 0 0">${esc(rv.gen)} säännöt</div>
     <ul class="req">${res.map(({r, ok}) => chk(ok, r.label + (!ok && r.info ? ` <small>(${r.info(c)})</small>` : ''))).join('')}${chk(okDyno, okDyno ? 'Dynolappu nykyisestä kokoonpanosta' : anyDyno ? 'Dynolappu on mitattu liian pienellä vaihteella – mittaa uudestaan vähintään 3. vaihteella' : 'Dynolappu nykyisestä kokoonpanosta puuttuu – mittaa dynossa vähintään 3. vaihteella')}</ul>
     <div class="offer">${esc(rv.short)} haastaa: <b>${rv.dist} m kiihdytys</b></div>
-    ${ok ? `<div class="sub" style="margin:10px 0 2px">Panos · rahaa ${state.money} €</div>${stakeHTML(rv)}<div class="row"><button class="btn" id="rvNo">Hylkää</button></div>`
+    ${ok && honor ? `<div class="sub" style="margin:10px 0 2px">Kunniakisa</div><p style="margin:2px 0 6px;color:var(--muted)">Voitit jo ${esc(rv.gen)} rahat. Uusinnat ajetaan ilman panoksia, pelkästä kunniasta.</p><div class="row"><button class="btn pri" id="rvHonor">Ajetaan kunniasta ▸</button><button class="btn" id="rvNo">Hylkää</button></div>`
+      : ok ? `<div class="sub" style="margin:10px 0 2px">Panos · rahaa ${state.money} €</div>${stakeHTML(rv)}<div class="row"><button class="btn" id="rvNo">Hylkää</button></div>`
       : `<div class="row"><button class="btn pri" id="rvGarage">Pajaan korjaamaan</button><button class="btn" id="rvNo">Hylkää</button></div>`}`, root => {
     root.querySelector('#rvDyno').onclick = () => { sfx.tick(); dynoPeek(d, `${rv.gen} dynolappu`, () => rivalSheet(rv)); };
     const mb = root.querySelector('#rvMine'); if (mine) mb.onclick = () => { sfx.tick(); dynoPeek(mine, 'Oma dynolappu', () => rivalSheet(rv)); };
     root.querySelector('#rvNo').onclick = () => { sfx.nope(); toast(`${rv.short}: ”${rv.say.decline}”`); modeSheet(); };
     const go = k => { RACE.stake = {s:rivalStake(rv), k}; closeSheet(); toast(`${rv.short}: ”${rv.say.accept}”`, 'good'); raceStart(); };
     const y = root.querySelector('#rvYes'); if (y && ok) y.onclick = () => go(1);
+    const hn = root.querySelector('#rvHonor'); if (hn && ok) hn.onclick = () => { RACE.stake = null; closeSheet(); toast(`${rv.short}: ”${rv.say.accept}”`, 'good'); raceStart(); };
     const y2 = root.querySelector('#rvDbl'); if (y2 && ok) y2.onclick = () => { sfx.whoosh(); go(2); };
     const g = root.querySelector('#rvGarage'); if (g) g.onclick = () => { closeSheet(); goHome(); };
   }, `${rv.gen} haaste`);
@@ -5666,7 +5707,7 @@ function raceStep(h) {
   if (D.phase === 'stage' && D.treeStage >= 3) thr = 0.45;
   if (green) {
     R.tg += h;
-    if (R.tg >= R.react) { held = false; if (!R.go) { R.go = true; R.moveT = R.tg; } thr = R.ref && tgtOf() ? paceThr() : 1; }
+    if (R.tg >= R.react) { held = false; if (!R.go) { R.go = true; R.moveT = R.tg; } thr = R.ref && tgtOf() ? paceThr() : R.rv.thrCap != null && S.slip ? 0 : (R.rv.thrCap ?? 1); }
     else thr = 0.45;
   }
   if (R.fin != null || R.dead) { thr = 0; brake = R.dead ? 0.6 : R.tg - R.fin > 0.4 ? 1 : 0; }
@@ -5701,7 +5742,8 @@ function raceFrame(dt) {
   const ex = R.c3.parts.exhaust, tips = ex?.userData.tips || [];
   const dsl = P.en.lay === 'd', dk = dsl ? clamp((R.st?.hp || 300) / 300, 0.6, 6) : 1;
   if (!P.electric) { R.exAcc = (R.exAcc || 0) + dt * (2 + R.thr * 8 * dk); while (R.exAcc > 1) { R.exAcc -= 1; for (const t of tips) puff(ex.localToWorld(t.clone()), {color:dsl ? (R.thr > 0.3 ? 0x101010 : 0x3a3a3a) : R.thr > 0.8 ? 0x8a8a8a : 0xd6d6d6, op:dsl ? 0.3 + R.thr * 0.5 : 0.1 + R.thr * 0.15, size:dsl ? 0.15 * (1 + R.thr * Math.min(2.5, dk * 0.4)) : 0.15, life:1.1, grow:3, v:new THREE.Vector3(-1.4 + S.v * 0.7, rnd(0.2, 0.5), rnd(-0.2, 0.2))}); } }
-  if (S.slip) { R.smAcc = (R.smAcc || 0) + dt * 10; while (R.smAcc > 1) { R.smAcc -= 1; for (const w of R.c3.wheels.slice(-2)) { const p = new THREE.Vector3(); w.getWorldPosition(p); p.y = 0.25; puff(p, {color:0xeeeeee, op:0.35, size:0.45, life:1.6, grow:3.5, v:new THREE.Vector3(S.v * 0.5 - rnd(0.5, 2.5), rnd(0.3, 1.1), rnd(-1, 1) + (p.z + LANE) * 0.6), drag:1.1}); } } }
+  if (S.slip || (P.surface === 'mud' && S.v > 1)) { R.smAcc = (R.smAcc || 0) + dt * (S.slip ? 10 : 4); while (R.smAcc > 1) { R.smAcc -= 1; for (const w of R.c3.wheels.slice(-2)) { const p = new THREE.Vector3(); w.getWorldPosition(p); p.y = 0.25; puff(p, surfacePuff(P.surface, S, p, LANE)); } } }
+  if (P.surface === 'mud') mudTint(R.c3.root, R, S, dt);
   // ääni: hiljenee etäisyyden mukaan
   if (R.snd && AU.ctx) {
     const dx = Math.abs((car3d?.root.position.x || 0) - R.c3.root.position.x), t = AU.ctx.currentTime;
@@ -5813,6 +5855,7 @@ function raceResult() {
     if (pay) pay.onclick = () => { if (!payRepair()) return; restartEngine(); resetRun(); cupRound(cupObj); };
     const ag = root.querySelector('#rrAgain');
     if (ag) ag.onclick = () => {
+      if (R.stake && rec.w > 0) { restartEngine(); resetRun(); rivalSheet(rv); return; }  // rahat voitettu: seuraavat ajetaan kunniasta
       const st = R.stake; if (st && state.money < st.s * st.k / 2) { toast('Rahat eivät riitä samaan panokseen.', 'bad'); sfx.nope(); restartEngine(); resetRun(); rivalSheet(rv); return; }
       closeSheet(); raceStart(); };
     root.querySelector('#rrHome').onclick = () => { closeSheet(); goHome(); };
@@ -6623,7 +6666,8 @@ function aiRunTime(rv, dist) {
   let t = 0;
   while (S.x < dist && t < 120) {
     if (!P.electric && S.gear > 0 && S.gear < P.nG && S.shiftT <= 0 && S.engaged && S.rpm >= P.limit * rv.shiftAt) { S.pending = S.gear + 1; S.shiftT = P.shiftT; S.gear = 0; }
-    physStep(S, P, {thr:1, brake:0, held:false}, h); t += h;
+    // liukkaalla ajava kuski (thrCap) nostaa jalan kaasulta, kun renkaat sutivat
+    physStep(S, P, {thr:rv.thrCap != null && S.slip ? 0 : (rv.thrCap ?? 1), brake:0, held:false}, h); t += h;
   }
   return (rv._t[dist] = t);
 }
@@ -6682,7 +6726,8 @@ function cupSheet(cup) {
 function cupRound(cup) {
   const run = state.cupRun, pair = cupPairs(cup, run.round), rv = cupDriver(pair.me);
   raceSetup(rv); RACE.cup = {cup, round:run.round};
-  if (cup.cargo || cup.tow) { RACE.P = carPhys(RACE.car, RACE.rv?.fuel || 'normal'); if (cup.cargo) addBale(RACE.c3.body); if (cup.tow) addTow(RACE.c3, cup.tow.kind); }  // lasti/kuorma myös vastustajalle
+  if (typeof surfaceShow === 'function') surfaceShow(cup.surface || null);
+  if (cup.cargo || cup.tow || cup.surface) { RACE.P = carPhys(RACE.car, RACE.rv?.fuel || 'normal'); if (cup.cargo) addBale(RACE.c3.body); if (cup.tow) addTow(RACE.c3, cup.tow.kind); }  // lasti/kuorma myös vastustajalle
   const o = pair.others;
   driveSheet(`<div class="rvHead"><span class="face">${rv.face}</span><div><h2>Kierros ${run.round + 1}/${cupRounds(cup)}: ${esc(rv.name)}</h2><div class="sub">${esc(rv.title)} · ${esc(rv.dialect)}</div></div></div>
     <div class="say"><b>${esc(rv.short)}:</b> ”${esc(rv._hello || sayNext(rv, 'hello'))}”</div>
@@ -6690,7 +6735,7 @@ function cupRound(cup) {
     ${cup.target ? `<div class="offer">Tavoiteaika <b>${fmt3(cup.target)} s</b> – lähimmäs osunut voittaa</div>` : ''}
     ${standingHTML(run, cup)}
     <div class="row"><button class="btn pri" id="crGo">Lähtöviivalle ▸</button><button class="btn" id="crBack">Cupin tiedot</button></div>`, root => {
-    root.querySelector('#crGo').onclick = () => { closeSheet(); toast(`${rv.short}: ”${rv.say.accept}”`, 'good'); raceStart(); RACE.cup = {cup, round:run.round}; if (cup.cargo) addBale(car3d.body); if (cup.tow) addTow(car3d, cup.tow.kind); if (cup.cargo || cup.tow) DRV.P = carPhys(); };
+    root.querySelector('#crGo').onclick = () => { closeSheet(); toast(`${rv.short}: ”${rv.say.accept}”`, 'good'); raceStart(); RACE.cup = {cup, round:run.round}; if (cup.cargo) addBale(car3d.body); if (cup.tow) addTow(car3d, cup.tow.kind); if (cup.cargo || cup.tow || cup.surface) DRV.P = carPhys(); };
     root.querySelector('#crBack').onclick = () => cupSheet(cup);
   }, `Kierros ${run.round + 1}/${cupRounds(cup)}`);
 }
@@ -6785,8 +6830,7 @@ const SPEED_TROPHIES = [150, 175, 200, 225, 250, 275, 300, 325, 350];
 function trophyList() {
   return [...CUPS.map(c => ({id:'cup_' + c.id, name:c.name, sub:'Cupin voittaja', kind:'cup'})),
     ...SPEED_TROPHIES.map(v => ({id:'v' + v, name:`${v} km/h`, sub:`400 m loppunopeus yli ${v} km/h`, kind:'speed'})),
-    {id:'lahjus', name:'Pikku sponssi', sub:'Ensimmäinen viranomaisen lahjonta', kind:'special'},
-    {id:'jackpot', name:'Päävoitto', sub:'Arvasta 2000 €', kind:'special'}];
+    {id:'lahjus', name:'Pikku sponssi', sub:'Ensimmäinen viranomaisen lahjonta', kind:'special'}];  // demo 30: arvan 2000 €:n voitosta ei enää pokaalia
 }
 function award(id) {
   state.trophies = state.trophies || {};
@@ -6908,7 +6952,7 @@ function openTicket(sym, prize) {
     if (prize) {
       state.money += prize; renderMoney(); save(); sfx.cash();
       res.innerHTML = `<b>${prize >= 100000 ? 'SUPERVOITTO! ' : prize >= 2000 ? 'PÄÄVOITTO! ' : ''}Voitit ${prize.toLocaleString('fi-FI')} €!</b>`; res.className = 'aRes win';
-      party(prize); if (prize === 2000) award('jackpot'); if (prize >= 100000) award('arpa100k');
+      party(prize); if (prize >= 100000) award('arpa100k');
     } else { res.textContent = 'Ei voittoa tällä kertaa.'; res.className = 'aRes'; }
   };
   el.querySelectorAll('canvas').forEach(cv => {
@@ -8341,6 +8385,16 @@ for (const [id, o] of Object.entries(CUP_TUNE)) {
   const d = cupDriver(id); if (!d) continue;
   Object.assign(d, {car:o.car, fuel:o.fuel, react:o.react, shiftAt:0.96}); delete d._t; delete d._dyno;
 }
+// Demo 30: American Top Fuel Tournee kovemmaksi. Kokonaisajat (reaktio mukana) 4,5–5,0 s ja paras (Big Mike) noin 4,3 s.
+// Pelaajan paras mahdollinen auto (Top Fuel, 8.2 V8 Nitrolla, Remmiahdin 8,0 ~7,5 bar, välitys 175 %) ajaa noin 4,12 s ilman reaktiota,
+// joten Miken voittaminen vaatii täydellisen virityksen ja alle 0,17 s:n reaktion. [moottori, ahto, välitys %, reaktio]
+const TF_TUNE = {dakota:['v12', 5.28, 170], sally:['v12', 5.57, 170], brooke:['v12', 6.04, 170], jimmy:['v12', 6.4, 170], rosa:['v12', 6.83, 170],
+  earl:['v12', 7.86, 170], hank:['e82', 7.6, 170], mike:['e82', 7.2, 175, [0.13, 0.18]]};
+for (const [id, [eng, boost, gpct, react]] of Object.entries(TF_TUNE)) {
+  const d = cupDriver(id); if (!d) continue;
+  Object.assign(d.car, {engine:{id:eng, pistons:'titan'}, turbo:{id:'sc4', boost}, gearbox:{id:'g3_topfuel', gpct}, ...(eng === 'e82' ? {seat:{id:'seat_r'}} : {})});
+  d.fuel = 'race'; d.shiftAt = 0.97; if (react) d.react = react; delete d._t; delete d._dyno;
+}
 /* ---------- Demo 28: tavoiteaika-cupit (15 s ja 10 s) ---------- */
 // Erän voittaa se, jonka 400 m:n loppuaika vihreästä valosta (reaktio mukaan lukien) on lähimpänä tavoiteaikaa.
 // Vastustajat osuvat 0,3–1,0 s:n päähän tavoitteesta (kuljettajan dev-väli): kaasu rajataan niin, että auto tulee maaliin arvottuna aikana.
@@ -8628,8 +8682,580 @@ function mummoResult() {
   if (money) sfx.cash(); else if (kind !== 'ok') sfx.nope();
 }
 { const _tl = trophyList; trophyList = () => [..._tl(), {id:'kirkkokyyti', name:'Kirkkokyyti', sub:'Veit Aune-mummon kirkolle juuri ajallaan', kind:'special'}]; }
+/* ---------- Demo 31: radan pinnat (jää, muta), auton arvo ja neljä uutta cupia ---------- */
+// Pinta luetaan cupista (cup.surface). gripK = pidon kerroin renkaiden ja rungon mukaan, crr = vierintävastus, slipK = pito sutiessa.
+const MUD_LOW = {maxtf:4.0, nuoli:1.8, kupla:1.3, pirpana:1.3, vanha:1.0, hiekkis:0.9, lava:0.8, paku:0.8, amfibi:0.7, rekku:0.6, monsteri:0.4};
+const SURFACES = {
+  ice: {id:'ice', name:'Jäärata', slipK:0.35,
+    gripK:wh => wh.id === 'w_nasta' ? 0.62 : wh.offroad ? 0.32 : ['w_kilpa', 'w_f1', 'w_drag', 'w_dragster'].includes(wh.id) ? 0.08 : 0.2,
+    crr:wh => (wh.offroad ? 0.02 : 0.012)},
+  mud: {id:'mud', name:'Mutarata', slipK:0.55,
+    gripK:(wh, ch) => (wh.id === 'w_monster' ? 0.8 : wh.offroad ? 0.62 : wh.id === 'w_dragster' ? 0.1 : 0.28) * (DRIVE[ch.id] === 'AWD' ? 1.2 : 1),
+    // syvä muta: matala auto ja pienet renkaat jäävät kiinni, isot renkaat kelluvat päällä
+    crr:(wh, ch) => 0.015 + 0.09 * (MUD_LOW[ch.id] ?? 1) * Math.pow(0.35 / wh.r, 0.8)},
+};
+function surfaceOf() { try { if (RALLY?.on) return SURFACES[RALLY.surface] || null; const k = RACE.on && RACE.cup?.cup?.surface; return k ? SURFACES[k] : null; } catch (e) { return null; } }
+// Radan ulkoasu: lumi ja jää tai muta pelkkinä päällystasoina radan ja nurmen päällä
+function surfaceShow(kind) {
+  const D = DRV; if (!track) return;
+  if (kind && !D.surf) D.surf = {};
+  if (kind && !D.surf[kind]) {
+    const g = G(); g.visible = false; track.add(g); D.surf[kind] = g;
+    const L = TRACK_END + 60, cx = TRACK_END / 2 - 30;
+    if (kind === 'ice') {
+      const snow = canvasTex(256, 256, (x, w, h) => { x.fillStyle = '#eef2f7'; x.fillRect(0, 0, w, h); for (let i = 0; i < 5000; i++) { x.fillStyle = `rgba(190,205,225,${rnd(0.1, 0.35)})`; x.fillRect(rnd(0, w), rnd(0, h), rnd(1, 3), rnd(1, 2)); } }, [300, 80]);
+      const ice = canvasTex(256, 256, (x, w, h) => { x.fillStyle = '#b9c9d8'; x.fillRect(0, 0, w, h); for (let i = 0; i < 4000; i++) { const v = rnd(160, 230) | 0; x.fillStyle = `rgba(${v},${v + 8},${v + 20},${rnd(0.15, 0.5)})`; x.fillRect(rnd(0, w), rnd(0, h), rnd(2, 14), 1); } }, [180, 2]);
+      flatT(new THREE.PlaneGeometry(3600, 900), std({map:snow, roughness:0.9}), cx, 0.02, 0, g);
+      flatT(new THREE.PlaneGeometry(L, 15), std({map:ice, roughness:0.15, metalness:0.1}), cx, 0.036, 0, g);
+      for (let x = 0; x < TRACK_END; x += 60) for (const z of [-8, 8]) wb(3, 1.0, 0.8, 0, matte(0xf4f6fa, 0, 0.95), x + rnd(0, 30), 0.5, z + (z > 0 ? 0.9 : -0.9), g);  // lumivallit
+    } else {
+      const mud = canvasTex(256, 256, (x, w, h) => { x.fillStyle = '#3e2a18'; x.fillRect(0, 0, w, h); for (let i = 0; i < 6000; i++) { const v = rnd(60, 150) | 0; x.fillStyle = `rgba(${v},${(v * 0.66) | 0},${(v * 0.38) | 0},${rnd(0.2, 0.6)})`; x.fillRect(rnd(0, w), rnd(0, h), rnd(2, 12), rnd(1, 3)); } }, [180, 2]);
+      const dirt = canvasTex(256, 256, (x, w, h) => { x.fillStyle = '#5a3d22'; x.fillRect(0, 0, w, h); for (let i = 0; i < 7000; i++) { const v = rnd(50, 130) | 0; x.fillStyle = `rgba(${v},${(v * 0.7) | 0},${(v * 0.4) | 0},${rnd(0.15, 0.5)})`; x.fillRect(rnd(0, w), rnd(0, h), 1, rnd(2, 5)); } }, [300, 80]);
+      flatT(new THREE.PlaneGeometry(3600, 900), std({map:dirt, roughness:1}), cx, 0.02, 0, g);
+      flatT(new THREE.PlaneGeometry(L, 15), std({map:mud, roughness:0.55, metalness:0.05}), cx, 0.042, 0, g);  // viivojen (0,04) päälle
+      for (let x = -20; x < TRACK_END; x += 25) for (const z of [-6.2, 6.2]) { const p = flatT(new THREE.PlaneGeometry(rnd(3, 7), rnd(1.5, 3)), std({color:0x2c1c10, roughness:0.15, metalness:0.15}), x + rnd(0, 20), 0.047, z + rnd(-0.6, 0.6), g); p.rotation.z = rnd(0, 3); }  // lätäköt
+    }
+  }
+  for (const [k, g] of Object.entries(D.surf || {})) g.visible = k === kind;
+  if (scene.fog && D.on) scene.fog.color.set(kind === 'ice' ? 0xe6edf5 : kind === 'mud' ? 0xc9c4b4 : 0xcfe6f6);
+}
+// Roiskeet: jäällä lumipöly, mudassa ruskeaa kuraa, joka lentää ja putoaa
+function surfacePuff(kind, S, p, lane) {
+  // roiskeet lentävät lähes auton vauhtia, jotta ne näkyvät takaa kuvaavalle kameralle auton vierellä ja takana
+  const vx = S.v * 0.8 - rnd(0.5, 3.5), side = rnd(-1.6, 1.6) + (p.z - lane) * 0.5;
+  if (kind === 'ice') return {color:0xffffff, op:0.5, size:0.3, life:1.2, grow:3, v:new THREE.Vector3(vx, rnd(0.8, 2), side), drag:1.0, g:2};
+  return {color:0x4a3220, op:0.9, size:0.22 + rnd(0, 0.25), life:1.3, grow:1.6, v:new THREE.Vector3(vx, rnd(2.5, 6) * (S.slip ? 1.4 : 1), side * 1.6), drag:0.3, g:7};
+}
+// Kura tarttuu autoon: korin ja osien värit tummuvat matkan mukaan (materiaalit kloonataan kerran, rakennus palauttaa)
+const _mudCol = new THREE.Color(0x5a3d22);
+function mudTint(root, st, S, dt) {
+  if (!root) return;
+  st.mudK = Math.min(1, (st.mudK || 0) + (S.v * dt) / 160 + (S.slip ? dt / 6 : 0));
+  st.mudT = (st.mudT || 0) + dt; if (st.mudT < 0.3) return; st.mudT = 0;
+  const k = st.mudK * 0.9;
+  root.traverse(o => {
+    if (!o.isMesh || !o.material?.color || o.material.map || o.material.transparent) return;
+    if (!o.userData.mudOrig) { o.material = o.material.clone(); o.userData.mudOrig = o.material.color.clone(); }
+    o.material.color.copy(o.userData.mudOrig).lerp(_mudCol, k * (o.position.y < 0.6 ? 1 : 0.6));
+  });
+}
+// Auton arvo = asennettujen osien listahinnat (purkaamolta halvalla ostettu osa lasketaan silti listahinnalla)
+function carValue(car = state.car) {
+  let v = 0;
+  for (const s of SLOTS) { const i = car[s] && inst(car[s]); if (!i) continue; const d = PARTS[i.id]; v += d.price || 0;
+    if (s === 'engine' && i.pistons) v += PISTONS[i.pistons]?.price || 0;
+    if (s === 'gearbox' && i.plus) v += PARTS[i.plus]?.price || 0;
+    if (s === 'chassis' && i.wide) v += WIDE_PRICE; }
+  return v;
+}
+Object.assign(RULE, {
+  maxValue: n => ({label:`Osien arvo yhteensä enintään <b>${n.toLocaleString('fi-FI')} €</b>`, test:c => carValue() <= n, info:c => `sinulla ${carValue().toLocaleString('fi-FI')} €`}),
+  minWeight: n => ({label:`Paino vähintään <b>${n} kg</b>`, test:c => compute().weight >= n, info:c => `sinulla ${compute().weight} kg`}),
+  chassisAny: ids => ({label:`Runko: <b>${ids.map(i => esc(PARTS[i].name)).join(' tai ')}</b>`, test:c => ids.includes(c.ch), info:c => (c.ch ? `sinulla ${esc(PARTS[c.ch].name)}` : 'ei runkoa')}),
+  notWheels: (ids, label) => ({label, test:c => !ids.includes(c.wh)}),
+});
+// Budjetti-cup: tutut kuskit halvoilla autoilla
+CUP_DRIVERS.push(again('lasse', {
+  id:'lasse_b', title:'Lappeenrannan torikauppias – tinkimisen mestari, nyt Hiekkiksellä', dist:400, react:[0.36, 0.48], shiftAt:0.9, level:3,
+  fuel:'race', car:{chassis:{id:'hiekkis', color:0x2a7d4f}, engine:{id:'e25'}, turbo:{id:'t1', boost:0.6}, gearbox:{id:'g5_perus'}, wheels:{id:'w_leveat'}, exhaust:{id:'ex_suora'}},
+  say:{
+    hello:['Torilla opitaan tinkimään. Tää Hiekkis makso vähemmän ku sun renkaat.', 'Halvalla hyvää, se on Lassen motto. Ja kaupan päälle vielä säkki perunoita.', 'Mie ostin V6:n ja pikkuturbon samalta ukolta ku kurkut. Kaikki toimii.', 'Ei tarvi olla kallis ollakseen nopea. Kysy vaikka torin kalakauppiaalta.', 'Budjetti on budjetti. Mie tiiän sen paremmin ku kukkaan.', 'Tää Hiekkis on ostettu kolmessa erässä. Viimenen erä on vielä maksamatta.'],
+    win:['Halvalla hyvää!', 'Tinkimällä voittoon.', 'Torikauppias tietää, mistä kannattaa säästää.', 'Perunasäkki kaupan päälle!', 'Ei makseta turhasta.', 'Mie panen tän pokaalin torikojun katolle.'],
+    lose:['Jaa, sie sait enemmän rahalle vastinetta.', 'Hyvin ostettu, hyvin ajettu.', 'Mie tingin seuraavalla kerralla kovemmin.', 'Sie oisit hyvä torikauppias.', 'Halvalla ei aina saa hyvää. Opin sen tänään.', 'Reilu kisa.'],
+    accept:'Kaupat on kaupat. Ajetaan.', foul:'Varaslähtö! Se on ku väärä vaihtoraha.',
+  },
+}), again('pena', {
+  id:'pena_b', title:'Porin bussikuski – eläkeläisen budjetilla', dist:400, react:[0.42, 0.56], shiftAt:0.88, level:2,
+  fuel:'normal', car:{chassis:{id:'kupla', color:0x7a4a22, cut:true}, engine:{id:'e20'}, turbo:{id:'t1'}, gearbox:{id:'g5_perus'}, wheels:{id:'w_leveat'}, exhaust:{id:'ex_orig'}},
+  say:{
+    hello:['Eläkeläisel ei oo rahaa haaskata. Kupla ja pikkuturbo, siin kaikki.', 'Mää ostin turbon kirpparilt. Kymmenel eurol. Pärisee kyl.', 'Porilaine ei maksa turhast. Porilaine ajaa.', 'Jazziki on halpaa, ku soittaa ite.', 'Tää on halpa auto mut kallis muisto.', 'Kattokka ny. Rälläkäl leikattu ja kirpparilt viritetty.'],
+    win:['Halpa ja nopee. Niinku bussi.', 'Eläke riitti voittoon.', 'Porilaine voitti taas.', 'Kirpparituboo ei voita mikkää.', 'Hyvä kisa.', 'Jazzi soi, pokaali tuli.'],
+    lose:['Jaa-a. Sää olit nopeempi.', 'Kirpparituboo ei riittäny.', 'Hyvä, nuori. Hyvä.', 'Ehkä mää ostan ens kerral kahdel kympil.', 'Reilu voitto.', 'Mää meen jazzii kuuntelemaa ja mietin.'],
+    accept:'Lähdetää.', foul:'Varaslähtö! Bussiki odottaa vihreetä.',
+  },
+}), again('tero', {
+  id:'tero_b', title:'Kotkan sataman nosturikuski – Pirpana konttiosilla', dist:400, react:[0.4, 0.52], shiftAt:0.9, level:2,
+  fuel:'race', car:{chassis:{id:'pirpana', color:0x3b6fb6}, engine:{id:'e20'}, turbo:{id:'t2', boost:0.8}, gearbox:{id:'g5_perus'}, wheels:{id:'w_leveat'}, exhaust:{id:'ex_orig'}},
+  say:{
+    hello:['Satamasta löytyy halpoja osia. Kontista putos tää kone.', 'Pirpana ja kilpaturbo kontista. Ei rahaa, pelkkää nosturimiehen tarkkuutta.', 'Kotkassa tehdään halvalla ja kovaa.', 'Tää auto on kasattu yövuorojen välissä.', 'Nosturi nostaa, Pirpana vetää.', 'Mä laskin budjetin konttien kyljestä.'],
+    win:['Satama voitti!', 'Halpa kone, kova vauhti.', 'Nosturimiehen tarkkuus.', 'Kotka kiittää.', 'Konttikone ei pettäny.', 'Hyvä kisa.'],
+    lose:['Jaa. Hyvin ajettu.', 'Konttikone jäi.', 'Sä olit nopeempi. Reilusti.', 'Mä palaan nosturiin.', 'Ensi kerralla kaivan paremman kontin.', 'Onnittelut.'],
+    accept:'Ajetaan.', foul:'Varaslähtö. Nosturikin odottaa lupaa.',
+  },
+}));
+// Talvi-cup: jäärata, nastarenkaat kunniaan
+CUP_DRIVERS.push(again('oona', {
+  id:'oona_i', title:'Oulun karting-mestari – jääradan kasvatti', dist:400, react:[0.36, 0.46], shiftAt:0.92, level:3, thrCap:0.25,
+  car:{chassis:{id:'kupla', color:0xe8e8ec, cut:true}, engine:{id:'e25'}, turbo:{id:'t1', boost:0.6}, gearbox:{id:'g5_premium'}, wheels:{id:'w_nasta'}, exhaust:{id:'ex_rst'}},
+  say:{
+    hello:['Mää sanoin jo: Oulusa harjotellaan talvella jäällä. Nyt sää näet, mitä se tarkottaa.', 'Nastat kiinni ja kaasu puoliväliin. Jäällä ei voita se, jolla on isoin kone.', 'Kauhian liukasta. Mää tykkään.', 'Mää laskin, että jäällä paras kaasun asento on nelkytviis prosenttia. Älä kerro muille.', 'Älä oo pölijä ja paina kaasu pohjaan. Sää vaan sutit paikallas.', 'Karting jäällä on Oulun kansallislaji. Melkein.'],
+    win:['Kuten laskin. Jää on mun.', 'Nastat ja järki voitti.', 'Oulu osaa talven.', 'Sää sutit, mää menin.', 'Kauhian helppoa.', 'Jäällä pärjää vaan rauhallinen.'],
+    lose:['Mitä? Sää osasit jään.', 'Kauhia… sää et sutinu ollenkaan.', 'Okei. Kunnioitan. Hyvä kaasujalka.', 'Mää laskin kaasun väärin.', 'Ensi talvena mää harjottelen enemmän.', 'Hyvä ajo, ihan oikeesti.'],
+    accept:'Jäälle.', foul:'Varaslähtö. Jäälläkin on säännöt.',
+  },
+}), again('kaija', {
+  id:'kaija_i', title:'Kajaanin moottorikelkkamestari – nyt neljällä pyörällä', dist:400, react:[0.38, 0.5], shiftAt:0.9, level:3, thrCap:0.35,
+  car:{chassis:{id:'lava', color:0x2b6fd6}, engine:{id:'e40'}, gearbox:{id:'g5_urheilu'}, wheels:{id:'w_nasta'}, exhaust:{id:'ex_suora'}},
+  say:{
+    hello:['Kelekalla mie oon ajanu jäällä koko ikäni. Tää on sama homma, mutta pyörillä.', 'Kainuussa talvi kestää kahdeksan kuukautta. Mie oon harjotellu.', 'Lava-Lasse ja nastat. Painoa takana, pitoa alla.', 'Jäällä kaasu on niinku kahvi: ei liikaa kerralla.', 'Kelekkamestari ei pelekää jäätä.', 'Pakkasta on kakskytä astetta. Just sopiva.'],
+    win:['Kelekkamestari voitti!', 'Kainuu osaa jään.', 'Nastat purivat.', 'Kahvi ja kaasu, molemmat maltilla.', 'Hyvä kisa, mutta jää on mun.', 'Mie lähen nyt kelekalla kotia.'],
+    lose:['No jopas. Sie osasit jään.', 'Hyvä kaasujalka. Mie myönnän.', 'Lava sutii, sie et.', 'Hyvin ajettu.', 'Ens talavena uuvestaan.', 'Kainuu kunnioittaa.'],
+    accept:'Jäälle, mennään.', foul:'Varaslähtö! Jäällä se on vielä pahempi.',
+  },
+}), again('elina', {
+  id:'elina_i', title:'Tornion moottorikelkkailija – neliveto ja nastat', dist:400, react:[0.34, 0.44], shiftAt:0.92, level:4, thrCap:0.75,
+  car:{chassis:{id:'amfibi', color:0x1f7fa8}, engine:{id:'e30'}, turbo:{id:'t2', boost:0.6}, gearbox:{id:'g5_urheilu'}, wheels:{id:'w_nasta'}, exhaust:{id:'ex_rst'}},
+  say:{
+    hello:['Mie otin Amfibin, ko se vettää kaikilla neljällä. Jäällä se on kulta.', 'Torniossa jää on paksua ja kuskit kovia.', 'Nastat, neliveto ja rauhallinen kaasu. Siinä talaven resepti.', 'Kelekkailija tietää: jäällä mennään sivuttain, jos ei osaa.', 'Mie ajoin tänne Tornionjoen jäätä pitkin. Lämmittelyksi.', 'Katoppa, miten neliveto lähtee jäältä.'],
+    win:['Neliveto vei!', 'Tornio osaa talaven.', 'Nastat purivat jäähän.', 'Kelekkailija voitti taas.', 'Hyvä kisa, mutta jää on kotikenttä.', 'Mie lähen jokea pitkin kotia.'],
+    lose:['Oho. Sie osasit jään paremmin.', 'Hyvä kaasujalka.', 'Neliveto ei riittäny.', 'Hyvin ajettu, ihan tosissaan.', 'Ens talavena uuvestaan.', 'Tornio kunnioittaa.'],
+    accept:'Jäälle.', foul:'Varaslähtö! Jäällä pittää malttaa.',
+  },
+}));
+// Raskas sarja: Paku tai Monsteri, 285-renkaat, enintään 1500 hv
+CUP_DRIVERS.push(again('pirjo', {
+  id:'pirjo_h', title:'Lohjan leipomon jakeluauto – nyt isolla koneella', dist:400, react:[0.36, 0.46], shiftAt:0.94, level:4,
+  fuel:'race', car:{chassis:{id:'paku', color:0xf3f1ec}, engine:{id:'e60'}, turbo:{id:'t4', boost:1.6}, gearbox:{id:'g6_kilpa'}, wheels:{id:'w_285'}, exhaust:{id:'ex_rst'}},
+  say:{
+    hello:['Jakeluauto täynnä pullaa painaa yli kaks tonnia. Nyt pullat on vaihdettu V8:aan.', 'Lohjalla pullat pitää olla perillä ennen kuutta. Siksi tää on nopea.', 'Paku ja 285-renkaat. Pullapaku ei sudi.', 'Raskas auto, kevyt kaasujalka. Niin kuljetetaan pullat ehjinä.', 'Mä ajoin tänne jakelureitin kautta. Kaks kyläkauppaa jäi väliin.', 'Leipomon auto on aina lämmin ja aina täynnä.'],
+    win:['Pullapaku voitti!', 'Pullat perillä ajoissa.', 'Lohja kiittää.', 'Raskas mutta nopea.', 'Hyvä kisa.', 'Nyt takas leipomolle.'],
+    lose:['Jaa. Sun paku oli nopeempi.', 'Pullat ehti jäähtyä.', 'Hyvin ajettu.', 'Mä laitan isomman turbon pullapakuun.', 'Reilu voitto.', 'Onnittelut. Ota pulla.'],
+    accept:'Pullat kyytiin, lähdetään.', foul:'Varaslähtö! Pullat lensi lattialle.',
+  },
+}), again('toomas', {
+  id:'toomas_h', title:'Virolainen rekkakuski – pakettiautolla', dist:400, react:[0.34, 0.44], shiftAt:0.95, level:4,
+  fuel:'race', car:{chassis:{id:'paku', color:0x2056a0}, engine:{id:'v12'}, turbo:{id:'t4', boost:1.5}, gearbox:{id:'g6_kilpa'}, wheels:{id:'w_285'}, exhaust:{id:'ex_rst'}},
+  say:{
+    hello:['Tere! Toomas. Rekka jäi Tallinnaan, otin pakettiauton. Siinä on V12.', 'Virossa pakettiauto on nopea, kun laiva lähtee.', 'Kaks tonnia ja kaksitoista sylinteriä. Hea kombinatsioon.', 'Mina ajan Helsingin ja Tallinnan väliä. Tämä on lyhyempi matka.', 'Raskas auto, mutta kevyt mieli.', 'Tere tulemast kisaan!'],
+    win:['Tere, voitto!', 'Eesti pakettiauto voitti.', 'V12 laulas.', 'Hea sõit!', 'Laiva ei ehtinyt lähteä.', 'Aitäh kisasta.'],
+    lose:['Oi. Sina olit kiirem.', 'Hästi sõidetud.', 'Pakettiauto jäi.', 'Mina otan ensi kerralla rekan.', 'Hyvä kisa, naaber.', 'Aitäh.'],
+    accept:'Läki!', foul:'Varaslähtö! Tolliski ei luba.',
+  },
+}), again('bob', {
+  id:'bob_h', title:'Teksasilainen monsteriautoammattilainen – katurenkailla', dist:400, react:[0.3, 0.4], shiftAt:0.95, level:5,
+  fuel:'race', car:{chassis:{id:'monsteri', color:0xd8282f}, engine:{id:'v12'}, turbo:{id:'t4', boost:1.4}, gearbox:{id:'g6_kilpa'}, wheels:{id:'w_285'}, exhaust:{id:'ex_ti'}},
+  say:{
+    hello:['Howdy! Big Bob. Monster truck katurenkailla. Looks weird, goes fast.', 'In Texas kaikki painaa kaks tonnia. Autot, hatut, pihvit.', 'Neliveto ja 285-renkaat. Grip, partner, grip.', 'Mä otin isot renkaat pois. Nyt se on nopea kuin pihvi grillissä.', 'Heavy is good. Heavy is Texas.', 'Yeehaw! Siis… raskas sarja!'],
+    win:['Yeehaw! Heavy Texas voitti!', 'Grip, partner. Grip.', 'Big truck, big voitto.', 'Monster on monster, vaikka pienet renkaat.', 'Good race!', 'Mä vien tämän ranchille.'],
+    lose:['Whoa! Sinä olit nopeampi.', 'Respect, partner.', 'Heavy ei riittänyt.', 'Good job!', 'Mä laitan isot renkaat takaisin ja mietin.', 'Fair and square.'],
+    accept:'Let’s roll, partner!', foul:'Whoa, varaslähtö! Pisteet Texasiin.',
+  },
+}));
+// Muta-cup: neliveto ja karkeat renkaat
+CUP_DRIVERS.push(again('toni', {
+  id:'toni_m', title:'Kouvolan monsteriautoshow – mutashow', dist:400, react:[0.36, 0.48], shiftAt:0.92, level:4, thrCap:1,
+  car:{chassis:{id:'monsteri', color:0x2e9e44}, engine:{id:'e60'}, turbo:{id:'t3', boost:1.0}, gearbox:{id:'g6_raskas'}, wheels:{id:'w_monster'}, exhaust:{id:'ex_suora'}},
+  say:{
+    hello:['Hyvät naiset ja herrat, mutashow alkaa! Kouvolan Monsteri mudassa.', 'Muta lentää, yleisö huutaa. Tää on mun elementti.', 'Monsterirenkaat kelluu mudan päällä. Sun autos uppoaa.', 'Mä juonnan tän kisan itse. Ja voitan sen.', 'Kuraa naamaan, se on show-bisnestä.', 'Katsokaa, kun neliveto lähtee mudasta!'],
+    win:['Mutashow voitti! Aplodit!', 'Monsteri kelluu, muut uppoaa.', 'Kouvola kiittää.', 'Kuraa naamaan, pokaali käteen.', 'Hyvä show!', 'Seuraava esitys huomenna.'],
+    lose:['Mitä? Sä kelluit paremmin.', 'Hyvä show, kaveri.', 'Muta vei mun pisteet.', 'Hyvin ajettu. Yleisö tykkäs.', 'Ensi kerralla isommat renkaat.', 'Kunnioitus.'],
+    accept:'Show alkaa!', foul:'Varaslähtö! Yleisö buuaa.',
+  },
+}), again('hanna', {
+  id:'hanna_m', title:'Nurmeksen melontamestari – Amfibi mudassa', dist:400, react:[0.36, 0.46], shiftAt:0.92, level:4, thrCap:1,
+  car:{chassis:{id:'amfibi', color:0xf3f1ec}, engine:{id:'e52'}, turbo:{id:'t3', boost:0.9}, gearbox:{id:'g6_kilpa'}, wheels:{id:'w_monster'}, exhaust:{id:'ex_rst'}},
+  say:{
+    hello:['Amfibi on tehty vedelle. Muta on melkein vettä.', 'Melontamestari tietää: virtaa vastaan ei kannata rynniä.', 'Maastorenkaat ja neliveto. Nurmeksen suolla on harjoteltu.', 'Muta roiskuu, mutta Amfibi kelluu.', 'Mä olen melonut mutaisempiakin jokia.', 'Rauhallinen veto, niin kuin melalla.'],
+    win:['Amfibi kellui voittoon!', 'Nurmes osaa mudan.', 'Melalla ja kaasulla.', 'Suo opetti.', 'Hyvä kisa.', 'Nyt pesulle.'],
+    lose:['Oho. Sä kelluit paremmin.', 'Hyvin ajettu.', 'Muta oli syvempää kuin luulin.', 'Ensi kerralla isommat renkaat.', 'Reilu voitto.', 'Kunnioitus.'],
+    accept:'Mutaan!', foul:'Varaslähtö! Mela ei ollut vielä vedessä.',
+  },
+}), again('bob', {
+  id:'bob_m', title:'Teksasilainen monsteriautoammattilainen – mud bogging', dist:400, react:[0.3, 0.4], shiftAt:0.94, level:5, thrCap:1,
+  car:{chassis:{id:'monsteri', color:0xd8282f}, engine:{id:'v12'}, turbo:{id:'t3', boost:1.2}, gearbox:{id:'g6_kilpa'}, wheels:{id:'w_monster'}, exhaust:{id:'ex_suora'}},
+  say:{
+    hello:['Howdy! Mud bogging! In Texas tämä on kansallislaji.', 'Big Bob, big tires, big mud.', 'Mä olen ajanut mudassa enemmän kuin asfaltilla.', 'Muta lentää, Bob nauraa.', 'Monster truck was born for this, partner.', 'Yeehaw! Mud time!'],
+    win:['Yeehaw! Mud king!', 'Texas mud voitti!', 'Big tires never lie.', 'Good race, partner. Go wash.', 'Mä vien tämän kuraisen pokaalin ranchille.', 'That was fun!'],
+    lose:['Whoa! Sinä kelluit paremmin.', 'Respect, mud partner.', 'Bob upposi.', 'Good job!', 'Mä menen pesemään ja miettimään.', 'Fair and square.'],
+    accept:'Let’s get dirty!', foul:'Whoa, varaslähtö! Mud rules, partner.',
+  },
+}));
+{
+  const budget = {id:'budjetticup', name:'Budjetti-cup', title:'Halvalla hyvää · osien arvo enintään 1 500 €', dist:400, req:'hotrodcup',
+    rules:[RULE.maxValue(1500)], drivers:['lasse_b', 'pena_b', 'tero_b'], prizes:[1200, 600, 300, 100], heatWin:90, prizePart:'w_nasta',
+    info:'Nokkeluuskisa: autossa olevien osien listahinnat saavat olla yhteensä enintään 1 500 €. Runko, moottori, ahdin, renkaat – kaikki lasketaan listahinnalla, vaikka olisit ostanut osan halvalla purkaamolta. Auton arvo näkyy pajan tiedoissa.'};
+  const winter = {id:'talvicup', name:'Talvi-cup', title:'Jäärata · kaasun säännöstely ratkaisee', dist:400, req:'lavacup', surface:'ice',
+    rules:[RULE.notWheels(['w_dragster', 'w_drag'], 'Ei kiihdytysrenkaita'), RULE.maxHp(500)], drivers:['oona_i', 'kaija_i', 'elina_i'], prizes:[2500, 1250, 625, 175], heatWin:180, prizePart:'w_maasto',
+    info:'Rata on jäässä. Pito on murto-osa tavallisesta: nastarenkaat purevat parhaiten, karkeat renkaat kohtalaisesti ja sliksit eivät lainkaan. Täydellä kaasulla auto vain sutii paikallaan, joten annostele kaasua napauttelemalla. Neliveto auttaa. Dynolapussa enintään 500 hv.'};
+  const heavy = {id:'raskascup', name:'Raskas sarja', title:'Paku tai Monsteri · vähintään 2 000 kg', dist:400, req:'rekkacup',
+    rules:[RULE.chassisAny(['paku', 'monsteri']), RULE.minWeight(2000), RULE.wheels('w_285'), RULE.maxHp(1500)], drivers:['pirjo_h', 'toomas_h', 'bob_h'], prizes:[7500, 3750, 1875, 500], heatWin:500, prizePart:'g6_raskas',
+    info:'Raskaiden sarja: Paku tai Monsteri, auton painon oltava vähintään 2 000 kg, renkaina 285-renkaat ja dynolapussa enintään 1 500 hv. Painava auto ja kapeahkot renkaat – lähtö ratkaisee.'};
+  const mud = {id:'mutacup', name:'Muta-cup', title:'Mutarata · neliveto ja karkeat renkaat', dist:400, req:'amfibicup', surface:'mud',
+    rules:[RULE.notWheels(['w_dragster'], 'Ei dragsterin renkaita')], drivers:['toni_m', 'hanna_m', 'bob_m'], prizes:[5500, 2750, 1375, 400], heatWin:400, prizePart:'w_monster',
+    info:'Rata on syvää mutaa, joka lentää ja sotkee. Pito heikkenee kaikilla renkailla paljon – monsterirenkailla vähiten, maasto- ja traktorinrenkailla kohtalaisesti. Matala auto ja pienet renkaat juuttuvat mutaan, korkea auto isoilla renkailla kelluu päällä. Neliveto on poikaa.'};
+  const after = (id, c) => CUPS.splice(CUPS.findIndex(x => x.id === id) + 1, 0, c);
+  after('hotrodcup', budget); after('lavacup', winter); after('rekkacup', heavy); after('amfibicup', mud);
+}
 if (state.pendingCarLoss) { loseCar(); state.pendingCarLoss = false; save(); setTimeout(() => { rebuildCar(); renderAll(); }, 0); }
-Object.assign(window.__paja, {buildMummo, mummoSheet, mummoStart, mummoResult, churchShow, MUMMO, assemble, THREE, paceSet, paceTime, tgtHeat, PARTS, canInstall, genJunk, owned, rohvessori, finalSheet, startFinal, MAX_RV, showTrophyPop, trophyPop, loseCar, showDialog});
+Object.assign(window.__paja, {carValue, SURFACES, surfaceShow, famOf, famTopTier, buildMummo, mummoSheet, mummoStart, mummoResult, churchShow, MUMMO, assemble, THREE, paceSet, paceTime, tgtHeat, PARTS, canInstall, genJunk, owned, rohvessori, finalSheet, startFinal, MAX_RV, showTrophyPop, trophyPop, loseCar, showDialog});
+/* ==== src/p12_ralli.js ==== */
+/* ================= RALLI (demo 32): pieni rata, rattiohjaus, automaattivaihteet ================= */
+// Ajomalli: nykyinen pituussuuntainen fysiikka (physStep: moottori, vaihteisto, pito, sutiminen) + kaksipyörämalli sivuttais-
+// dynamiikkaan. Renkaalla on yksi pitobudjetti (kitkaympyrä): kaasu tai jarru vie pitoa sivuttaissuunnasta ja päinvastoin.
+// Rata on suljettu Catmull-Rom-käyrä; radan ulkopuolella (nurmi) pito laskee ja vierintävastus kasvaa, kauempana on penkka.
+var RALLY = {on:false, surface:'gravel', world:null, pts:[], n:0, w:9.5, phase:'menu', lap:0, laps:[], idx:0, cp:false, wheel:0, wheelMax:110, wheelDown:false,
+  steerKey:0, Fx:0, off:false, bumpT:0, dustAcc:0, stuckT:0, LAPS:2};
+Object.assign(SURFACES, {
+  gravel: {id:'gravel', name:'Sora', slipK:0.6, gripK:wh => (wh.offroad ? 0.8 : wh.id === 'w_nasta' ? 0.7 : ['w_kilpa', 'w_f1', 'w_drag', 'w_dragster'].includes(wh.id) ? 0.35 : 0.55), crr:() => 0.03},
+  snow: {id:'snow', name:'Lumi', slipK:0.45, gripK:wh => (wh.id === 'w_nasta' ? 0.75 : wh.offroad ? 0.42 : ['w_kilpa', 'w_f1', 'w_drag', 'w_dragster'].includes(wh.id) ? 0.1 : 0.28), crr:wh => (wh.offroad ? 0.028 : 0.02)},
+});
+const RALLY_SURF = [['gravel', 'Sora', 'Metsäsora: pito 55–80 % renkaista riippuen, maastorenkaat parhaat. Auto luistaa hallitusti.'],
+  ['snow', 'Lumi', 'Lumipelto: nastarenkaat purevat, muut eivät. Kaasua maltilla.'],
+  ['asphalt', 'Asfaltti', 'Lentokenttärata: täysi pito, kovat nopeudet, jarrutus ratkaisee.']];
+// Radan ohjauspisteet (x, z), suljettu silmukka, noin 1,1 km
+const RALLY_CTRL = [[0, 0], [70, -4], [130, -30], [175, -85], [185, -150], [150, -205], [85, -225], [25, -200], [-10, -150], [-50, -125], [-110, -140], [-160, -110], [-185, -55], [-165, 5], [-115, 45], [-60, 40], [-25, 18]];
+function rallySample(n = 700) {
+  const C = RALLY_CTRL, m = C.length, pts = [];
+  const cr = (p0, p1, p2, p3, t) => { const t2 = t * t, t3 = t2 * t; return 0.5 * ((2 * p1) + (-p0 + p2) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 + (-p0 + 3 * p1 - 3 * p2 + p3) * t3); };
+  for (let i = 0; i < n; i++) {
+    const u = i / n * m, k = Math.floor(u), t = u - k, P = j => C[((k + j) % m + m) % m];
+    pts.push({x:cr(P(-1)[0], P(0)[0], P(1)[0], P(2)[0], t), z:cr(P(-1)[1], P(0)[1], P(1)[1], P(2)[1], t)});
+  }
+  let s = 0;
+  for (let i = 0; i < n; i++) {
+    const p = pts[i], q = pts[(i + 1) % n], o = pts[(i - 1 + n) % n];
+    const tx = q.x - o.x, tz = q.z - o.z, L = Math.hypot(tx, tz) || 1;
+    p.tx = tx / L; p.tz = tz / L; p.nx = p.tz; p.nz = -p.tx;  // vasen normaali (y-akselin ympäri +90°)
+    p.s = s; s += Math.hypot(q.x - p.x, q.z - p.z);
+  }
+  for (let i = 0; i < n; i++) { const o = pts[(i - 4 + n) % n], q = pts[(i + 4) % n]; const da = Math.atan2(q.tz, q.tx) - Math.atan2(o.tz, o.tx); pts[i].k = Math.atan2(Math.sin(da), Math.cos(da)) / Math.max(1, q.s - o.s); }
+  RALLY.pts = pts; RALLY.n = n; RALLY.len = s;
+}
+function rallyNearest(x, z) {
+  const R = RALLY, n = R.n, pts = R.pts; let best = R.idx, bd = Infinity;
+  for (let d = -20; d <= 20; d++) { const i = ((R.idx + d) % n + n) % n, p = pts[i], dd = (p.x - x) ** 2 + (p.z - z) ** 2; if (dd < bd) { bd = dd; best = i; } }
+  R.idx = best; const p = pts[best];
+  return {i:best, p, d:(x - p.x) * p.nx + (z - p.z) * p.nz, dist:Math.sqrt(bd)};
+}
+// Rata-nauha keskiviivan ympärille
+function rallyRibbon(w, y, mat, uvAlong = 6) {
+  const R = RALLY, n = R.n, pos = [], uv = [], idx = [];
+  for (let i = 0; i <= n; i++) {
+    const p = R.pts[i % n], wob = w / 2;
+    pos.push(p.x + p.nx * wob, y, p.z + p.nz * wob, p.x - p.nx * wob, y, p.z - p.nz * wob);
+    const u = (i < n ? p.s : R.len) / uvAlong; uv.push(u, 0, u, 1);
+    if (i < n) { const a = i * 2; idx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3); }
+  }
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2)); g.setIndex(idx); g.computeVertexNormals();
+  const m = new THREE.Mesh(g, mat); m.receiveShadow = true; m.castShadow = false; return m;
+}
+function rallyBuild() {
+  if (RALLY.world) return;
+  trackTextures(); rallySample();
+  const R = RALLY, g = G(); g.visible = false; scene.add(g); R.world = g;
+  const grass = canvasTex(256, 256, (x, w, h) => { x.fillStyle = '#5f9a3c'; x.fillRect(0, 0, w, h); for (let i = 0; i < 9000; i++) { const gg = rnd(120, 175) | 0; x.fillStyle = `rgba(${rnd(60, 110) | 0},${gg},${rnd(40, 70) | 0},${rnd(0.15, 0.5)})`; x.fillRect(rnd(0, w), rnd(0, h), 1, rnd(2, 5)); } }, [160, 160]);
+  const snowG = canvasTex(256, 256, (x, w, h) => { x.fillStyle = '#eef2f7'; x.fillRect(0, 0, w, h); for (let i = 0; i < 5000; i++) { x.fillStyle = `rgba(190,205,225,${rnd(0.1, 0.35)})`; x.fillRect(rnd(0, w), rnd(0, h), rnd(1, 3), rnd(1, 2)); } }, [160, 160]);
+  flatT(new THREE.PlaneGeometry(1600, 1600), std({map:grass, roughness:0.95}), 0, 0, -80, g);
+  R.snowGround = flatT(new THREE.PlaneGeometry(1600, 1600), std({map:snowG, roughness:0.9}), 0, 0.012, -80, g);
+  // pinnat: sora, lumi, asfaltti
+  const gravelT = canvasTex(256, 256, (x, w, h) => { x.fillStyle = '#a8906a'; x.fillRect(0, 0, w, h); for (let i = 0; i < 9000; i++) { const v = rnd(110, 200) | 0; x.fillStyle = `rgba(${v},${(v * 0.88) | 0},${(v * 0.68) | 0},${rnd(0.2, 0.7)})`; x.fillRect(rnd(0, w), rnd(0, h), rnd(1, 3), rnd(1, 3)); } for (let i = 0; i < 40; i++) { x.fillStyle = 'rgba(90,75,55,0.25)'; x.fillRect(rnd(0, w), rnd(0, h), rnd(4, 40), rnd(1, 2)); } }, [1, 1]);
+  const snowT = canvasTex(256, 256, (x, w, h) => { x.fillStyle = '#dde4ee'; x.fillRect(0, 0, w, h); for (let i = 0; i < 6000; i++) { const v = rnd(170, 235) | 0; x.fillStyle = `rgba(${v},${v + 6},${v + 16},${rnd(0.15, 0.5)})`; x.fillRect(rnd(0, w), rnd(0, h), rnd(2, 12), 1); } for (const yy of [60, 100, 156, 196]) { x.fillStyle = 'rgba(150,165,185,0.35)'; x.fillRect(0, yy, w, 6); } }, [1, 1]);
+  const asphT = canvasTex(256, 256, (x, w, h) => { x.fillStyle = '#3d3f43'; x.fillRect(0, 0, w, h); for (let i = 0; i < 9000; i++) { const v = rnd(40, 100) | 0; x.fillStyle = `rgba(${v},${v},${v + 4},${rnd(0.2, 0.6)})`; x.fillRect(rnd(0, w), rnd(0, h), rnd(1, 2), rnd(1, 2)); } x.fillStyle = '#e8e4da'; x.fillRect(0, 2, w, 4); x.fillRect(0, h - 6, w, 4); }, [1, 1]);
+  for (const t of [gravelT, snowT, asphT]) { t.wrapS = t.wrapT = THREE.RepeatWrapping; }
+  R.mats = {gravel:std({map:gravelT, roughness:0.95, side:THREE.DoubleSide}), snow:std({map:snowT, roughness:0.4, metalness:0.05, side:THREE.DoubleSide}), asphalt:std({map:asphT, roughness:0.85, side:THREE.DoubleSide})};
+  R.shoulderMats = {gravel:std({color:0x6a5a40, roughness:1, side:THREE.DoubleSide}), snow:std({color:0xc9d3df, roughness:0.9, side:THREE.DoubleSide}), asphalt:std({color:0x8a8070, roughness:1, side:THREE.DoubleSide})};
+  R.shoulder = rallyRibbon(R.w + 3.2, 0.02, R.shoulderMats.gravel);
+  R.ribbon = rallyRibbon(R.w, 0.03, R.mats.gravel, 5); g.add(R.shoulder, R.ribbon);
+  // lähtö- ja maaliviiva ja portti
+  const p0 = R.pts[0], ang = Math.atan2(-p0.tz, p0.tx);
+  const gate = G(); gate.position.set(p0.x, 0, p0.z); gate.rotation.y = ang; g.add(gate);
+  for (const s of [-1, 1]) cyl(0.2, 0.2, 6, MAT.steel, 'y', 0, 3, s * (R.w / 2 + 1), gate, 10);
+  mk(new THREE.BoxGeometry(0.3, 1.2, R.w + 2.6), std({map:textTex(['LÄHTÖ · MAALI'], {bg:'#c8262b', fg:'#ffffff', w:1024, h:96, size:60}), roughness:0.6}), 0, 5.8, 0, gate);
+  const chk = flatT(new THREE.PlaneGeometry(1.0, R.w - 0.4), std({map:TT.check, roughness:0.6}), 0, 0.045, 0, gate);
+  // kaarrekyltit ja heinäpaalit ulkokaarteeseen
+  const hay = std({color:0xd9b44a, roughness:0.95}), hayG = new THREE.CylinderGeometry(0.55, 0.55, 1.2, 10); hayG.rotateZ(Math.PI / 2);
+  let lastSign = -1e9;
+  for (let i = 0; i < R.n; i++) {
+    const p = R.pts[i];
+    if (Math.abs(p.k) > 0.014 && p.s - lastSign > 60) {
+      lastSign = p.s; const q = R.pts[(i - 40 + R.n) % R.n], side = p.k > 0 ? 1 : -1;  // kyltti 40 näytettä ennen kaarretta, ulkoreunalle
+      const sx = q.x - q.nx * side * (R.w / 2 + 3), sz = q.z - q.nz * side * (R.w / 2 + 3);
+      signBoard(g, sx, sz, Math.atan2(-q.tx, -q.tz), textTex([side > 0 ? '◀ ◀' : '▶ ▶'], {bg:'#ffc21a', fg:'#1c1a16', w:256, h:140, size:84, border:'#1c1a16'}), 1.6, 0.9, 1.3);
+    }
+    if (Math.abs(p.k) > 0.02 && i % 6 === 0) { const side = p.k > 0 ? 1 : -1, bx = p.x - p.nx * side * (R.w / 2 + 2.2), bz = p.z - p.nz * side * (R.w / 2 + 2.2); const b = mk(hayG, hay, bx, 0.55, bz, g); b.rotation.y = Math.atan2(-p.tz, p.tx); }
+  }
+  // puut, kivet, kukkulat ja pilvet
+  const rng = mulberry(31), pts = [];
+  for (let i = 0; i < 9000 && pts.length < 900; i++) {
+    const x = -420 + rng() * 840, z = -480 + rng() * 760; let ok = true;
+    for (let j = 0; j < R.n; j += 3) { const p = R.pts[j]; if ((p.x - x) ** 2 + (p.z - z) ** 2 < 15 * 15) { ok = false; break; } }
+    if (ok) pts.push([x, z, rng(), 0.7 + rng() * 0.8]);
+  }
+  const cones = [[2.4, 3.2, 2.2], [1.9, 2.8, 3.7], [1.3, 2.4, 5.1]].map(([r, h, y]) => { const c = new THREE.ConeGeometry(r, h, 9); c.translate(0, y, 0); return c; });
+  const crownS = mergeGeometries(cones), trunk = new THREE.CylinderGeometry(0.22, 0.32, 2.2, 8); trunk.translate(0, 1.1, 0);
+  const ci = new THREE.InstancedMesh(crownS, std({color:0x2f6b3a, roughness:0.85, flatShading:true}), pts.length), ti = new THREE.InstancedMesh(trunk, matte(0x5a3b24), pts.length);
+  const q = new THREE.Quaternion(), sc = new THREE.Vector3(), ps = new THREE.Vector3(), m4 = new THREE.Matrix4(), up = new THREE.Vector3(0, 1, 0);
+  pts.forEach((p, i) => { q.setFromAxisAngle(up, p[2] * 40); sc.setScalar(p[3]); ps.set(p[0], 0, p[1]); m4.compose(ps, q, sc); ci.setMatrixAt(i, m4); ti.setMatrixAt(i, m4); });
+  ci.castShadow = true; g.add(ci, ti);
+  const rock = matte(0x7a7d80, 0.1, 0.9);
+  for (let i = 0; i < 40; i++) { const p = pts[Math.floor(rng() * pts.length)]; const r = mk(new THREE.IcosahedronGeometry(rnd(0.5, 1.6), 1), rock, p[0] + rnd(-6, 6), 0.3, p[1] + rnd(-6, 6), g); r.scale.y = 0.6; r.rotation.y = rnd(0, 3); }
+  const hm = std({color:0x6f9a55, roughness:1, flatShading:true});
+  for (let i = 0; i < 10; i++) { const a = i / 10 * Math.PI * 2, h = mk(new THREE.IcosahedronGeometry(1, 2), hm, Math.cos(a) * 560, -8, -80 + Math.sin(a) * 560, g); h.scale.set(rnd(110, 180), rnd(30, 60), rnd(80, 130)); h.castShadow = false; }
+  const cm = std({color:0xffffff, roughness:1, fog:false, emissive:0xffffff, emissiveIntensity:0.25});
+  for (let i = 0; i < 12; i++) { const c = G(); c.position.set(rnd(-400, 400), rnd(70, 110), rnd(-480, 300)); g.add(c); for (let k = 0; k < 6; k++) { const sp = mk(new THREE.SphereGeometry(rnd(6, 11), 12, 8), cm, rnd(-14, 14), rnd(-2, 3), rnd(-6, 6), c); sp.castShadow = false; sp.scale.y = 0.6; } }
+  // katsojia lähtösuoralle
+  const crowdG = new THREE.CapsuleGeometry ? new THREE.CapsuleGeometry(0.22, 0.45, 3, 8) : new THREE.CylinderGeometry(0.22, 0.22, 0.9, 8);
+  const crowd = new THREE.InstancedMesh(crowdG, std({roughness:0.8}), 160), col = new THREE.Color();
+  for (let i = 0; i < 160; i++) { const p = R.pts[(5 + i * 2) % R.n], side = i % 2 ? 1 : -1; m4.makeTranslation(p.x + p.nx * side * (R.w / 2 + 3.5 + (i % 3)), 0.7, p.z + p.nz * side * (R.w / 2 + 3.5 + (i % 3))); crowd.setMatrixAt(i, m4); crowd.setColorAt(i, col.setHSL(rng(), 0.6, 0.5)); }
+  crowd.castShadow = true; g.add(crowd);
+  g.traverse(o => { if (o.isMesh && !o.isInstancedMesh && o.geometry.type === 'PlaneGeometry') o.castShadow = false; });
+  mergeStatic(g, new Set([R.shoulder, R.ribbon, R.snowGround, ci, ti, crowd, gate]));
+  rallyUI();
+}
+// Ratti ja Radalle-nappi ajonäkymään
+function rallyUI() {
+  if ($('rWheel')) return;
+  const st = document.createElement('style');
+  st.textContent = `#rWheel{position:absolute;left:calc(env(safe-area-inset-left,0px) + 16px);bottom:calc(env(safe-area-inset-bottom,0px) + 18px);width:150px;height:150px;border-radius:50%;touch-action:none;user-select:none;
+      background:radial-gradient(circle at 50% 50%,#2a2c30 0 26%,#1a1b1e 27% 34%,#3b3e44 35% 100%);border:10px solid #15161a;box-shadow:0 8px 24px #000b,inset 0 0 0 4px #4a4f57}
+    #rWheel::before{content:"";position:absolute;left:50%;top:50%;width:14px;height:62px;margin:-56px 0 0 -7px;background:#1a1b1e;border-radius:6px}
+    #rWheel::after{content:"";position:absolute;left:50%;top:50%;width:130px;height:14px;margin:0 0 0 -65px;background:#1a1b1e;border-radius:6px}
+    #rWheel i{position:absolute;left:50%;top:50%;width:14px;height:14px;margin:-7px;border-radius:50%;background:#ffc21a}
+    #rReset{position:absolute;left:50%;top:calc(env(safe-area-inset-top,0px) + 58px);transform:translateX(-50%);padding:8px 14px;border-radius:12px;font-weight:800;background:var(--panel);color:var(--text);border:1px solid var(--line)}
+    @media (max-height:430px){#rWheel{width:118px;height:118px}#rWheel::before{height:48px;margin-top:-44px}#rWheel::after{width:100px;margin-left:-50px}}`;
+  document.head.appendChild(st);
+  const w = document.createElement('div'); w.id = 'rWheel'; w.hidden = true; w.innerHTML = '<i></i>'; $('drive').appendChild(w);
+  const b = document.createElement('button'); b.id = 'rReset'; b.hidden = true; b.textContent = '↻ Radalle'; $('drive').appendChild(b);
+  b.onclick = () => { sfx.tick(); rallyReset(); };
+  let a0 = 0, w0 = 0, pid = null;
+  const ang = e => { const r = w.getBoundingClientRect(); return Math.atan2(e.clientY - (r.top + r.height / 2), e.clientX - (r.left + r.width / 2)) * 180 / Math.PI; };
+  w.addEventListener('pointerdown', e => { e.preventDefault(); pid = e.pointerId; w.setPointerCapture(pid); a0 = ang(e); w0 = RALLY.wheel; RALLY.wheelDown = true; });
+  w.addEventListener('pointermove', e => { if (e.pointerId !== pid || !RALLY.wheelDown) return; let d = ang(e) - a0; d = ((d + 540) % 360) - 180; RALLY.wheel = clamp(w0 - d, -RALLY.wheelMax, RALLY.wheelMax); });
+  const up = e => { if (e.pointerId !== pid) return; RALLY.wheelDown = false; pid = null; };
+  w.addEventListener('pointerup', up); w.addEventListener('pointercancel', up); w.addEventListener('lostpointercapture', up);
+}
+function rallySheet() {
+  raceClear(); DRV.phase = 'menu';
+  const best = state.rally?.best || {};
+  driveSheet(`<h2>Ralli <small style="font-size:14px;color:var(--muted)">demo</small></h2><div class="sub">Pieni rata · ${Math.round((RALLY.len || 1100) / 10) * 10} m kierros · ${RALLY.LAPS} kierrosta kelloa vastaan</div>
+    <p style="margin:6px 0">Vasen peukalo pyörittää rattia, oikealla kaasu ja jarru. Vaihteet vaihtuvat automaattisesti. Näppäimistöllä nuolet tai WASD. Renkaat ja vetotapa vaikuttavat pitoon kuten muuallakin.</p>
+    <div class="modes">${RALLY_SURF.map(([id, nm, info]) => `<button class="mode${RALLY.surface === id ? ' duel' : ''}" data-surf="${id}"><b>${nm}${best[id] ? ` · paras ${rallyFmt(best[id])}` : ''}</b><small>${info}</small></button>`).join('')}</div>
+    <div class="row"><button class="btn" id="raBack">← Kisavalikko</button><button class="btn" id="raHome">Pajaan</button></div>`, root => {
+    root.querySelectorAll('[data-surf]').forEach(b => b.onclick = () => { sfx.tick(); closeSheet(); rallyStart(b.dataset.surf); });
+    root.querySelector('#raBack').onclick = () => { sfx.tick(); modeSheet(); };
+    root.querySelector('#raHome').onclick = () => { closeSheet(); goHome(); };
+  }, 'Ralli');
+}
+const rallyFmt = t => { const m = Math.floor(t / 60), s = t - m * 60; return (m ? m + ':' : '') + (m && s < 10 ? '0' : '') + s.toFixed(3).replace('.', ','); };
+function rallyStart(surface) {
+  const D = DRV, R = RALLY;
+  if (!D.on) return;
+  rallyBuild(); raceClear();
+  R.surface = surface; R.on = true; R.phase = 'count'; R.lap = 0; R.laps = []; R.cp = false; R.idx = 0; R.wheel = 0; R.Fx = 0; R.off = false; R.stuckT = 0;
+  R.ribbon.material = R.mats[surface] || R.mats.gravel; R.shoulder.material = R.shoulderMats[surface] || R.shoulderMats.gravel; R.snowGround.visible = surface === 'snow';
+  if (scene.fog) scene.fog.color.set(surface === 'snow' ? 0xe6edf5 : 0xcfe6f6);
+  track.visible = false; R.world.visible = true;
+  resetRun(); D.phase = 'rally'; D.cam = 'chase'; D.hard = false; D.fly = false;
+  const S = D.S, p0 = R.pts[0];
+  S.px = p0.x - p0.tx * 6; S.pz = p0.z - p0.tz * 6; S.yaw = Math.atan2(-p0.tz, p0.tx); S.vL = 0; S.r = 0; S.steer = 0; S.gear = D.P.electric ? 1 : 1; S.engaged = true;
+  R.t0 = D.t; R.cn = null; D.camPos.set(0, 0, 0);
+  $('xShift').hidden = true; $('rWheel').hidden = false; $('rReset').hidden = false; $('dCam').style.display = 'none';
+  const xg = $('xTgt'); xg.hidden = false; xg.textContent = `kierros 1/${R.LAPS}`;
+  syncInterior(); sfx.tick();
+}
+function rallyStop() {
+  const R = RALLY, D = DRV; if (!R.on) return;
+  R.on = false; R.phase = 'menu';
+  if (R.world) R.world.visible = false; if (track) track.visible = true;
+  if (scene.fog) scene.fog.color.set(0xcfe6f6);
+  $('xShift').hidden = false; if ($('rWheel')) { $('rWheel').hidden = true; $('rReset').hidden = true; } $('dCam').style.display = ''; $('xTgt').hidden = true; $('xCount').hidden = true;
+  if (car3d) { car3d.root.rotation.set(0, 0, 0); if (car3d.body) car3d.body.rotation.set(0, 0, 0); for (const w of car3d.wheels) w.rotation.y = 0; }
+  D.camPos.set(0, 0, 0); D.tGreen = null;
+  if (D.on) resetRun();
+}
+// Takaisin radalle: lähimpään kohtaan, radan suuntaan
+function rallyReset() {
+  const D = DRV, S = D.S, R = RALLY; if (!R.on || !S) return;
+  const nr = rallyNearest(S.px, S.pz), p = nr.p;
+  S.px = p.x; S.pz = p.z; S.yaw = Math.atan2(-p.tz, p.tx); S.v = S.vw = 0; S.vL = 0; S.r = 0; S.slip = false; S.steer = 0; R.wheel = 0;
+  D.camPos.set(0, 0, 0);
+}
+// Automaattivaihteisto: ylös 92 %:ssa punarajasta, alas kun kierrokset putoavat
+function rallyAutoShift(S, P) {
+  if (P.electric || S.gbBroken) return;
+  if (S.shiftT > 0 || S.pending != null) return;
+  if (S.gear === 0) { S.gear = 1; return; }
+  const imp = S.v / kGear(P, S.gear);  // kierrokset auton nopeudesta (ei kytkimen luistosta eikä sutimisesta)
+  if (S.gear < P.nG && imp >= P.limit * 0.92) { S.pending = S.gear + 1; S.shiftT = P.shiftT; S.gear = 0; engineSound.cut(); if (S.boost > 0.4) engineSound.blowoff(S.boost); }
+  else if (S.gear > 1 && imp < P.limit * 0.42 && S.v / kGear(P, S.gear - 1) < P.limit * 0.9) { S.pending = S.gear - 1; S.shiftT = P.shiftT; S.gear = 0; }
+}
+// Yksi fysiikka-askel: sivuttaisdynamiikka (kaksipyörämalli, kitkaympyrä) + pituussuunta (physStep)
+function rallyStep(S, P, inp, h) {
+  const R = RALLY, def = car3d.def, chId = inst(state.car.chassis).id, drive = DRIVE[chId] || 'TV';
+  const L = Math.max(1.6, def.wheelX[0] - def.wheelX[1]), a = L * 0.5, b = L * 0.5, m = P.m;
+  // ohjauskulma: pienenee vauhdissa, jotta ratti ei nykäise
+  const dmax = 0.5 / (1 + S.v / 16);
+  S.steer += (clamp(inp.steer, -1, 1) * dmax - S.steer) * Math.min(1, h * 7);
+  const vx = Math.max(S.v, 0.4), vL = S.vL || 0, r = S.r || 0;
+  // sivuttaispito: renkaan pito ilman vetotapakerrointa, pinta mukana (P.grip sisältää pinnan)
+  const mu = clamp(P.grip / gripOf(chId) * 0.78, 0.18, 1.5) * (R.off ? 0.6 : 1);
+  const Fmax = mu * m * G9 * 0.5;
+  const Fx = R.Fx || 0, fxF = drive === 'EV' ? Fx : drive === 'AWD' ? Fx * 0.5 : 0, fxR = drive === 'TV' ? Fx : drive === 'AWD' ? Fx * 0.5 : 0;
+  const bk = inp.brake ? 1 : 0;
+  const capF = Fmax * (1 + 0.12 * bk) * Math.sqrt(Math.max(0.05, 1 - (fxF / Fmax) ** 2));
+  const capR = Fmax * (1 - 0.35 * bk) * Math.sqrt(Math.max(0.05, 1 - (fxR / Fmax) ** 2));
+  const C = Fmax * 9;
+  const af = Math.atan2(vL + a * r, vx) - S.steer, ar = Math.atan2(vL - b * r, vx);
+  const sk = Math.min(1, S.v / 2.5);  // paikallaan ei synny sivuttaisvoimaa
+  const Fyf = -capF * Math.tanh(C * af / capF) * sk, Fyr = -capR * Math.tanh(C * ar / capR) * sk;
+  const Iz = m * (a * a + b * b) * 0.55;
+  const dvL = (Fyf + Fyr) / m - S.v * r, dr = (a * Fyf - b * Fyr) / Iz;
+  S.vL = vL + dvL * h; S.r = r + dr * h;
+  if (S.v < 1.5) { const k = Math.max(0, 1 - h * 5); S.vL *= k; S.r *= k; }
+  S.slideK = Math.max(Math.abs(af), Math.abs(ar));
+  // sivuttaisliuku syö vauhtia
+  S.v = Math.max(0, S.v - Math.abs(vL) * 0.25 * h);
+  // pituussuunta: vetävän akselin pitobudjetista on osa sivuttaiskäytössä
+  const latUse = Math.min(1, Math.abs(drive === 'TV' ? Fyr : drive === 'AWD' ? (Fyf + Fyr) / 2 : Fyf) / Fmax);
+  const Pr = Object.assign({}, P, {gripF:P.gripF * Math.sqrt(Math.max(0.05, 1 - latUse * latUse)) * (R.off ? 0.6 : 1), crr:P.crr + (R.off ? 0.06 : 0), brakeF:P.brakeF * (R.off ? 0.7 : 1)});
+  const v0 = S.v;
+  physStep(S, Pr, {thr:inp.thr, brake:inp.brake, held:false}, h);
+  R.Fx = m * (S.v - v0) / h + Pr.crr * m * G9 * (S.v > 0.05 ? 1 : 0);
+  // sijainti maailmassa: eteen (cos, -sin), vasen (-sin, -cos)
+  S.yaw += S.r * h;
+  const cy = Math.cos(S.yaw), sy = Math.sin(S.yaw);
+  S.px += (S.v * cy - S.vL * sy) * h; S.pz += (-S.v * sy - S.vL * cy) * h;
+}
+function rallyPlace(dt, accel) {
+  const D = DRV, S = D.S, R = RALLY, root = car3d.root, n = car3d.wheels.length;
+  root.position.set(S.px, 0.04, S.pz);
+  D.pitch = (D.pitch || 0) + (clamp(accel * 0.004, -0.05, 0.05) - (D.pitch || 0)) * Math.min(1, dt * 6);
+  root.rotation.set(0, S.yaw, D.pitch);
+  const roll = clamp(S.v * S.r * 0.012, -0.09, 0.09);
+  D.roll = (D.roll || 0) + (roll - (D.roll || 0)) * Math.min(1, dt * 6);
+  const shk = D.P.dead ? 0 : shakeAmp(D.st, D.thr) + (R.off ? 0.004 : R.surface === 'gravel' ? 0.0015 : 0) * Math.min(1, S.v / 8);
+  if (car3d.body) { car3d.body.position.set(rnd(-1, 1) * shk * 0.5, car3d.axleY + rnd(-1, 1) * shk, rnd(-1, 1) * shk * 0.5); car3d.body.rotation.set(D.roll + rnd(-1, 1) * shk * 0.6, 0, 0); }
+  car3d.wheels.forEach((w, i) => {
+    const side = Math.sign(w.position.z) || 1, Rr = w.userData.R || 0.35, vv = i >= n - 2 ? S.vw : S.v;
+    w.userData.spin.rotation.z += (side > 0 ? -1 : 1) * vv / Rr * dt;
+    w.rotation.y = i < 2 ? S.steer : 0;
+  });
+  key.position.set(S.px + 30, 70, S.pz + 22); key.target.position.set(S.px, 0, S.pz); key.target.updateMatrixWorld();
+}
+const _rf = new THREE.Vector3(), _rc = new THREE.Vector3();
+function rallyCamera(dt) {
+  const D = DRV, S = D.S, def = car3d.def, portrait = innerWidth < innerHeight;
+  const cy = Math.cos(S.yaw), sy = Math.sin(S.yaw);
+  // kamera katsoo hieman liikesuuntaan (luisussa auton sivuun)
+  const ba = Math.atan2(-(S.vL || 0), Math.max(S.v, 1)) * 0.5, cb = Math.cos(S.yaw + ba), sb = Math.sin(S.yaw + ba);
+  const dist = def.camR * (portrait ? 1.15 : 0.95) + Math.min(4, S.v * 0.07), hgt = 1.5 + def.height * 0.7 + (portrait ? 0.9 : 0);
+  _rc.set(S.px - cb * dist, hgt, S.pz + sb * dist);
+  if (D.camPos.lengthSq() === 0) D.camPos.copy(_rc); else D.camPos.lerp(_rc, Math.min(1, dt * 5));
+  camera.position.copy(D.camPos);
+  if (cam.shake > 0) { camera.position.x += rnd(-1, 1) * cam.shake; camera.position.y += rnd(-1, 1) * cam.shake; cam.shake = Math.max(0, cam.shake - dt * 0.8); }
+  _rf.set(S.px + cy * 7, def.height * 0.5 + 0.4, S.pz - sy * 7); camera.lookAt(_rf);
+  camera.near = 0.3; const fov = (portrait ? 64 : 52) + clamp(S.v * 0.1, 0, 12);
+  if (Math.abs(camera.fov - fov) > 0.05 || camera.near !== D.lastNear) { camera.fov = fov; D.lastNear = camera.near; camera.updateProjectionMatrix(); }
+}
+function updateRally(dt, now) {
+  const D = DRV, R = RALLY, S = D.S, K = D.keys, sheet = !$('sheetWrap').hidden;
+  if (!car3d?.def || !S) return true;
+  D.t += dt;
+  D.acc += dt; if (D.acc > 0.3) { D.acc = 0; const nb = S.gbBroken; D.P = carPhys(); S.gbBroken = nb; }
+  const P = D.P;
+  // lähtölaskenta
+  if (R.phase === 'count') {
+    const left = 3 - (D.t - R.t0), el = $('xCount');
+    if (left <= 0) { el.hidden = true; R.phase = 'run'; D.tGreen = D.t; R.lapT = D.t; msg('AJA!', 'good', 1.0); beep(990, 0.25); }
+    else { const n = Math.ceil(left); if (n !== R.cn) { R.cn = n; el.hidden = false; el.textContent = String(n); el.classList.remove('txt', 'pop'); void el.offsetWidth; el.classList.add('pop'); beep(440, 0.08); } }
+  }
+  // syötteet: ratti (kosketus tai näppäimet), kaasu ja jarru
+  const kl = !sheet && (K.ArrowLeft || K.KeyA), kr = !sheet && (K.ArrowRight || K.KeyD);
+  if (kl || kr) R.wheel += ((kl ? 1 : -1) * R.wheelMax - R.wheel) * Math.min(1, dt * 6);
+  else if (!R.wheelDown) R.wheel += (0 - R.wheel) * Math.min(1, dt * 9);
+  const wEl = $('rWheel'); if (wEl) wEl.style.transform = `rotate(${-R.wheel}deg)`;
+  const steer = R.wheel / R.wheelMax;
+  const running = R.phase === 'run' || R.phase === 'done';
+  const gasIn = !sheet && running && R.phase !== 'done' && (D.gas || K.ArrowUp || K.KeyW) ? 1 : 0;
+  const brkIn = !sheet && (D.brk || K.ArrowDown || K.KeyS) || R.phase === 'done' ? 1 : 0;
+  D.thr = (D.thr || 0) + (gasIn - (D.thr || 0)) * Math.min(1, dt * 14);
+  rallyAutoShift(S, P);
+  const n = Math.min(16, Math.ceil(dt / 0.004)), h = dt / n, v0 = S.v;
+  let cut = false, slipAmt = 0;
+  for (let i = 0; i < n; i++) {
+    rallyStep(S, P, {thr:D.thr, brake:brkIn, steer}, h);
+    if ((P.dead || S.gbBroken)) { S.v = Math.min(S.v, Math.max(0, S.v - BREAK_DECEL * h)); S.vw = S.v; }
+    if (S.cut) cut = true; slipAmt = Math.max(slipAmt, S.slip ? S.vw - S.v : 0);
+  }
+  if (![S.v, S.vL, S.r, S.px, S.pz, S.yaw, S.rpm].every(Number.isFinite)) { S.v = S.vw = 0; S.vL = 0; S.r = 0; S.rpm = P.idle; R.Fx = 0; if (!Number.isFinite(S.px)) rallyReset(); }  // varmistus
+  const accel = (S.v - v0) / Math.max(dt, 1e-4);
+  // rata: sijainti radalla, nurmi ja penkka, kierrokset
+  const nr = rallyNearest(S.px, S.pz), half = R.w / 2;
+  R.off = Math.abs(nr.d) > half + 0.3;
+  if (Math.abs(nr.d) > half + 7) {
+    const sgn = Math.sign(nr.d), over = Math.abs(nr.d) - (half + 7);
+    S.px -= nr.p.nx * sgn * over; S.pz -= nr.p.nz * sgn * over;
+    if (S.v > 3 && now - R.bumpT > 500) { R.bumpT = now; sfx.crunch(); cam.shake = 0.25; msg('PENKKA!', 'bad', 0.8); }
+    S.v *= 0.6; S.vw = S.v; S.vL *= -0.3; S.r *= 0.5;
+  }
+  if (R.phase === 'run') {
+    if (!R.cp && Math.abs(nr.i - R.n / 2) < 30) R.cp = true;
+    if (R.cp && R.prevI != null && R.prevI > R.n * 0.85 && nr.i < R.n * 0.15) {
+      const t = D.t - R.lapT; R.laps.push(t); R.lap++; R.lapT = D.t; R.cp = false;
+      const best = (state.rally = state.rally || {best:{}}).best; const rec = !best[R.surface] || t < best[R.surface];
+      if (rec) best[R.surface] = t; save();
+      msg(`KIERROS ${R.lap}: ${rallyFmt(t)}${rec ? ' · ENNÄTYS!' : ''}`, 'good', 2.2); if (rec) sfx.cash(); else beep(880, 0.15);
+      if (R.lap >= R.LAPS) { R.phase = 'done'; D.tGreen = null; D.resT = setTimeout(rallyResult, 1800); }
+      else { D.tGreen = D.t; $('xTgt').textContent = `kierros ${R.lap + 1}/${R.LAPS}`; }
+    }
+    // juuttuminen: paikallaan nurmella → takaisin radalle
+    if (R.off && S.v < 0.5) { R.stuckT += dt; if (R.stuckT > 3) { R.stuckT = 0; rallyReset(); msg('Takaisin radalle', 'warn', 1.2); } } else R.stuckT = 0;
+  }
+  R.prevI = nr.i;
+  // lämpö, kuluminen ja rikkoutuminen kuten kiihdytyksessä
+  const eI = inst(state.car.engine), gI = state.car.gearbox && inst(state.car.gearbox);
+  if (!P.dead) {
+    S.Te = heatStep(S.Te, D.thr > 0.05 ? S.L : 0, P.wearMul, D.thr, dt); if (P.noBoom) S.Te = Math.min(S.Te, TEMP_RED - 0.02); S.TeMax = Math.max(S.TeMax, S.Te);
+    if (S.Te >= TEMP_RED) { eI.cond = 0; engineFailure(); sfx.boom(); cam.shake = 0.4; msg('MOOTTORI HAJOSI!', 'bad', 2.5); if (R.phase === 'run') { R.phase = 'done'; D.tGreen = null; D.resT = setTimeout(rallyResult, 2500); } }
+  }
+  if (!P.electric && !S.gbBroken && gI) { S.Tg = heatStep(S.Tg, D.thr > 0.05 ? S.Lgb : 0, 1, D.thr, dt); S.TgMax = Math.max(S.TgMax, S.Tg); if (S.Tg >= TEMP_RED) { gI.cond = 0; S.gbBroken = true; S.gear = 0; S.pending = null; gearboxFailure(); } }
+  D.saveT = (D.saveT || 0) + dt; if (D.saveT > 1) { D.saveT = 0; save(); }
+  // äänet
+  const exK = D.st.exK || 'orig';
+  if (!P.dead) engineSound.set(S.rpm, S.shiftT > 0 ? D.thr * 0.3 : D.thr, P.boostSet, S.L, exK, P.boostSet > 0 ? Math.max(0, S.boost) / Math.max(0.3, P.boostSet) : 0);
+  if (cut && now - D.cutT > 90) { D.cutT = now; engineSound.cut(); }
+  const slide = clamp((S.slideK || 0) / 0.35, 0, 1) * Math.min(1, S.v / 6);
+  squeal.set(R.surface === 'asphalt' ? Math.max(S.slip ? 0.5 : 0, slide * 0.8) : slide * 0.15);
+  // pöly ja roiskeet: sora pölyää, lumi pöllyää, asfaltilla savu sutiessa
+  const rear = car3d.wheels.slice(-2);
+  if (R.surface !== 'asphalt' || S.slip || slide > 0.6) {
+    R.dustAcc += dt * (R.surface === 'asphalt' ? 8 : 4 + Math.min(10, S.v * 0.5) + slide * 10 + (S.slip ? 8 : 0));
+    while (R.dustAcc > 1) { R.dustAcc -= 1;
+      for (const w of rear) { const p = new THREE.Vector3(); w.getWorldPosition(p); p.y = 0.2;
+        const cy = Math.cos(S.yaw), sy = Math.sin(S.yaw), vb = S.v * 0.75;
+        if (R.surface === 'asphalt') puff(p, {color:0xeeeeee, op:0.35, size:0.4, life:1.6, grow:3, v:new THREE.Vector3(vb * cy + rnd(-1, 1), rnd(0.5, 1.4), -vb * sy + rnd(-1, 1)), drag:1.1});
+        else puff(p, {color:R.surface === 'snow' ? 0xffffff : 0xe6dcc4, op:R.off ? 0.6 : 0.5, size:0.5 + slide * 0.5, life:1.6 + slide, grow:3.5, v:new THREE.Vector3(vb * 0.8 * cy + rnd(-1.5, 1.5), rnd(0.8, 2.2), -vb * 0.8 * sy + rnd(-1.5, 1.5)), drag:0.9}); } }
+  }
+  if (!P.electric && !P.dead) { D.exAcc = (D.exAcc || 0) + dt * (2 + D.thr * 8); while (D.exAcc > 1) { D.exAcc -= 1; exhaustFx(0.12 + D.thr * 0.15, D.thr > 0.8 ? 0x8a8a8a : 0xd6d6d6, false); } }
+  rallyPlace(dt, accel);
+  seatDrivers(); tuhoFrame(dt);
+  rallyCamera(dt);
+  updateHud(false); syncReopen();
+  return true;
+}
+function rallyResult() {
+  const D = DRV, R = RALLY; D.resT = null; if (!R.on) return;
+  engineSound.set(D.P.idle, 0, 0, 0, 'orig', 0);
+  const best = state.rally?.best?.[R.surface], tot = R.laps.reduce((a, b) => a + b, 0), done = R.laps.length >= R.LAPS;
+  const broke = D.P.dead ? 'Moottori hajosi kesken ajon.' : D.S.gbBroken ? 'Vaihteisto hajosi kesken ajon.' : '';
+  autoRepair();
+  const nm = RALLY_SURF.find(s => s[0] === R.surface)?.[1] || '';
+  driveSheet(`<h2 style="font-size:28px">${done ? rallyFmt(tot) : 'KESKEYTYI'}</h2><div class="sub">Ralli · ${esc(nm)} · ${R.laps.length}/${R.LAPS} kierrosta</div>
+    <div class="slip"><div class="slipH"><span>KIERROSAJAT</span><span>${esc(nm.toUpperCase())}</span></div>
+      ${R.laps.map((t, i) => `<div class="slipR"><span>Kierros ${i + 1}</span><b>${rallyFmt(t)}</b></div>`).join('')}
+      <div class="slipR big"><span>Paras kierros</span><b>${best ? rallyFmt(best) : '–'}</b></div></div>
+    ${broke ? `<p style="color:#ffb1a6;font-weight:700">${broke}</p>` : ''}
+    <p style="color:var(--muted)">Demo: rata on sama kaikilla alustoilla, vastustajia ja vaurioita ei vielä ole. Mekaanikko huolsi auton ajon jälkeen.</p>
+    <div class="row"><button class="btn pri" id="rlAgain">Uudestaan</button><button class="btn" id="rlSurf">Vaihda alusta</button></div>
+    <div class="row"><button class="btn" id="rlMenu">Kisavalikko</button><button class="btn" id="rlHome">Pajaan</button></div>`, root => {
+    root.querySelector('#rlAgain').onclick = () => { closeSheet(); restartEngine(); rallyStart(R.surface); };
+    root.querySelector('#rlSurf').onclick = () => { closeSheet(); restartEngine(); rallyStop(); rallySheet(); };
+    root.querySelector('#rlMenu').onclick = () => { closeSheet(); restartEngine(); rallyStop(); modeSheet(); };
+    root.querySelector('#rlHome').onclick = () => { closeSheet(); goHome(); };
+  }, 'Näytä tulokset');
+  if (done) sfx.cash();
+}
+Object.assign(window.__paja, {RALLY, rallyStart, rallyStop, rallySheet, rallyReset, rallyNearest});
 </script>
 <!-- LÄHDEKOODIN LIITTEET
 ==== src/README.md ====
@@ -8835,6 +9461,36 @@ Maxin puheille mennessä myymään varapullon (5 000 €, `rohvessori('lost')`).
 Salainen lisäaine on myynnissä lisävarustehyllyssä, kun Rohvessori on tavattu (`PARTS.add_prof.shopIf/shopPrice/shopSheet`).
 Napautus tuo Rohvessorin paikalle (`rohvShop`): ”pähkinäinen maku”, ei muista keksinnön tarkoitusta, ”sama hinta kuin ennenkin:
 kymppitonni”. Uusintaostot maksavat 10 000 € (`ROHV_PRICE2`), myös Maxille menetetyn pullon tilalle; ensimmäinen osto 5 000 €.
+
+## Demo 30
+
+American Top Fuel Tournee kovemmaksi (`TF_TUNE`): kokonaisajat 4,5–5,0 s, Big Mike noin 4,3 s. Pelaajan paras mahdollinen
+Top Fuel ajaa noin 4,12 s ilman reaktiota. Arvan 2000 €:n voitosta ei enää pokaalia. Purkaamon valikoima tasaisempi
+(`genJunk`: paino oman tason mukaan, sama osalaji harvemmin kahdesti). Yksittäiskisat: rahaa kultakin kuskilta vain
+ensimmäisestä voitosta, sen jälkeen kunniakisa ilman panosta ja tehoraja 110 % kuskin dynolapusta. Vaihteiston vahvistus
+asennetaan pysyvästi vaihteistoon (`gearbox.plus`, `installGbPlus`, `gbMulOf`); vanhat tallennukset siirretään automaattisesti.
+
+## Demo 31
+
+Radan pinnat (`SURFACES`, `cup.surface`): jää (`ice`) ja muta (`mud`) muuttavat pitoa (`gripK` renkaiden ja vetotavan mukaan),
+vierintävastusta (`crr`; mudassa rungon mataluus `MUD_LOW` ja renkaan koko) ja sutimisen pitoa (`slipK`, normaalisti 0,82).
+`carPhys` lukee pinnan `surfaceOf()`-funktiolla (RACE.cup). Ulkoasu `surfaceShow` (lumi+jää tai muta+lätäköt päällystasoina),
+roiskeet `surfacePuff` (lumipöly / kuraa painovoimalla), kura tarttuu autoon `mudTint`, jäljet `SKID.snow`/`SKID.mud`.
+Liukkaan radan tekoälykuskit: `thrCap` (kaasun raja) ja jalka pois kaasulta sutiessa (aiRunTime, raceStep).
+Auton arvo `carValue()` = osien listahinnat (+ männät, vahvistus, levikkeet); näkyy pajan tiedoissa. Uudet säännöt
+`RULE.maxValue/minWeight/chassisAny/notWheels`. Uudet cupit: Budjetti-cup (≤1 500 €, Hot rod -cupin jälkeen, palkintona
+nastarenkaat), Talvi-cup (jää, Lava-cupin jälkeen, ≤500 hv), Raskas sarja (Paku/Monsteri ≥2 000 kg, 285-renkaat, ≤1 500 hv,
+Rekka-cupin jälkeen) ja Muta-cup (Amfibi-cupin jälkeen, ei dragsterin renkaita). Testit: `tools/t12.py`.
+
+## Demo 32 – Ralli (demo)
+
+Uusi tiedosto `p12_ralli.js`. Kisavalikossa "Ralli": pieni suljettu rata (Catmull-Rom-käyrä `RALLY_CTRL`, n. 1 km), kaksi
+kierrosta kelloa vastaan, alustana sora, lumi tai asfaltti (`SURFACES.gravel/snow`, asfaltti = normaali pito). Ajomalli:
+`rallyStep` = kaksipyörämalli sivuttaisdynamiikkaan (sortokulmat, tanh-saturaatio, kitkaympyrä vetävällä akselilla, painonsiirto
+jarrutuksessa) + nykyinen `physStep` pituussuuntaan. Ohjaus: kosketusratti `#rWheel` (vasen alakulma) tai nuolet/WASD, kaasu ja
+jarru kuten ennen, automaattivaihteisto `rallyAutoShift`. Radan ulkopuolella pito laskee ja vierintävastus kasvaa, 7 m:n
+päässä penkka. `rallyReset` (↻ Radalle) palauttaa radalle. Kierrosajat `state.rally.best[alusta]`. `surfaceOf` lukee
+rallin pinnan. Testi: `tools/t13.py <gravel|snow|asphalt>` (yksinkertainen linjanseuraaja ajaa radan).
 ==== src/build.sh ====
 #!/bin/bash
 # Kokoaa pelin yhdeksi sivuksi. Lähdetiedostot erotellaan merkinnöillä "==== src/<nimi> ====",
@@ -8844,7 +9500,7 @@ cd /home/claude/paja
 {
   cat p1_head.html
   echo '<script type="module">'
-  for f in p2_models.js p3_scene.js p4_ui.js p5_drag.js p6_kisa.js p7_tuho.js p8_maailma.js p9_lisat.js p10_kuski.js p11_finaali.js; do echo "/* ==== src/$f ==== */"; cat "$f"; done
+  for f in p2_models.js p3_scene.js p4_ui.js p5_drag.js p6_kisa.js p7_tuho.js p8_maailma.js p9_lisat.js p10_kuski.js p11_finaali.js p12_ralli.js; do echo "/* ==== src/$f ==== */"; cat "$f"; done
   echo '</script>'
   echo '<!-- LÄHDEKOODIN LIITTEET'
   for f in README.md build.sh tools/drive_test.py; do echo "==== src/$f ===="; cat "$f"; done
