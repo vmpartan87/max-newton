@@ -739,6 +739,17 @@ const CATS = [
   ['energia','Tankit & akut'],['ohjaamo','Ohjaamo'],['lisat','Lisäosat'],
 ];
 const SLOT_NAME = {additive:'Lisäaine',chassis:'Runko',engine:'Moottori',turbo:'Ahdin',gearbox:'Vaihteisto',gbplus:'Vaihteiston vahvistus',wheels:'Renkaat',energy:'Tankki/akku',seat:'Istuin',steer:'Ratti',exhaust:'Pakoputket',spoiler:'Takasiipi',lights:'Valoramppi',tool:'Työkalu',ratio:'Välitys',glue:'Ihmeliima'};
+// Rallivarusteet (vain testiversiossa, jossa ralli on): piikkipuskuri ja panssarilevyt. Paino lasketaan autoon kuten muillakin osilla.
+if (window.MN_TEST) {
+  SLOTS.push('bumper', 'armor');
+  Object.assign(SLOT_NAME, {bumper:'Puskuri', armor:'Panssari'});
+  Object.assign(PARTS, {
+    bump_spike:{slot:'bumper',cat:'lisat',name:'Piikkipuskuri',sub:'Rallissa: puhkaisee vastustajan renkaan, hajottaa esteet helposti, omat vauriot edestä −40 %. 35 kg.',spikes:true,weight:35,price:600},
+    arm_kevyt: {slot:'armor',cat:'lisat',name:'Panssarilevyt',sub:'Rallissa: vauriot −25 %, pyörät ja palat pysyvät paremmin kiinni. 60 kg.',armor:0.75,weight:60,price:450},
+    arm_raskas:{slot:'armor',cat:'lisat',name:'Raskas panssari',sub:'Rallissa: vauriot −45 %. 150 kg – auto hidastuu selvästi.',armor:0.55,weight:150,price:1100},
+    arm_tankki:{slot:'armor',cat:'lisat',name:'Tankkipanssari',sub:'Rallissa: vauriot −60 %. 260 kg – kuin ajaisi kassakaapilla.',armor:0.4,weight:260,price:2400},
+  });
+}
 
 for (const k of Object.keys(PARTS)) PARTS[k].id = k;
 
@@ -1752,6 +1763,27 @@ function buildSpoiler() {
   }
   return g;
 }
+// Piikkipuskuri: teräspalkki ja piikit eteenpäin (+x). w = leveys.
+function buildBumper(w = 1.5) {
+  const g = G(), n = Math.max(4, Math.round(w / 0.22)), cone = new THREE.ConeGeometry(0.045, 0.3, 8); cone.rotateZ(-Math.PI / 2);
+  rb(0.12, 0.16, w, 0.02, MAT.dark, 0, 0, 0, g);
+  for (const s of [1, -1]) rb(0.3, 0.07, 0.07, 0.01, MAT.dark, -0.18, 0, s * w * 0.32, g);
+  for (let k = 0; k < n; k++) { const z = -w / 2 + 0.08 + k * (w - 0.16) / (n - 1); mk(cone, MAT.chrome, 0.2, k % 2 ? 0.04 : -0.04, z, g); }
+  return g;
+}
+// Panssarilevyt kylkiin (ja raskaammissa myös eteen). len = pituus, w = leveys
+const ARMOR_COL = {arm_kevyt:0x8d949b, arm_raskas:0x5b6167, arm_tankki:0x55603f};
+function buildArmor(id, len = 2.0, w = 1.4, h = 0.34) {
+  const g = G(), m = matte(ARMOR_COL[id] || 0x8d949b, 0.55, 0.5), rv = new THREE.CylinderGeometry(0.022, 0.022, 0.02, 6); rv.rotateX(Math.PI / 2);
+  const th = id === 'arm_tankki' ? 0.06 : id === 'arm_raskas' ? 0.045 : 0.03;
+  for (const s of [1, -1]) {
+    rb(len, h, th, 0.01, m, 0, 0, s * (w / 2 + th / 2), g);
+    for (let k = 0; k < 5; k++) for (const y of [-h * 0.32, h * 0.32]) mk(rv, MAT.chrome, -len / 2 + 0.12 + k * (len - 0.24) / 4, y, s * (w / 2 + th + 0.005), g);
+  }
+  if (id !== 'arm_kevyt') rb(th, h * 0.9, w * 0.8, 0.01, m, len / 2 + 0.05, 0.02, 0, g);
+  if (id === 'arm_tankki') rb(len * 0.5, th, w * 0.7, 0.01, m, len * 0.15, h * 0.5 + 0.12, 0, g);
+  return g;
+}
 function buildLights(post = 0.4) {
   const g = G();
   for (const s of [1, -1]) rb(0.05, post, 0.05, 0.015, MAT.black, 0, post / 2, s * 0.5, g);
@@ -1841,6 +1873,8 @@ function buildPartModel(id, cond = 1, slotDef = {}) {
     case 'exhaust': g = buildExhaust(id, !!slotDef.vertical); break;
     case 'spoiler': g = buildSpoiler(); break;
     case 'lights': g = buildLights(slotDef.post ?? 0.4); break;
+    case 'bumper': g = buildBumper(slotDef.w || 1.5); break;
+    case 'armor': g = buildArmor(id, slotDef.len || 2.0, slotDef.w || 1.4); break;
   }
   if (d.slot !== 'chassis' && d.slot !== 'wheels') applyCondition(g, cond);
   return g;
@@ -2780,6 +2814,16 @@ function assemble(car = state.car, o = {}) {
     ag.position.copy(parts.energy.userData.addMount);
     parts.energy.add(ag); parts.additive = ag; tag(ag, 'additive');
   }
+  // rallivarusteet: puskuri keulaan, panssari kylkiin rungon mittojen mukaan
+  for (const slot of ['bumper', 'armor']) {
+    const ri = car[slot] && inst(car[slot]); if (!ri) continue;
+    root.updateMatrixWorld(true); const bx = new THREE.Box3().setFromObject(def.g), mn = body.worldToLocal(bx.min.clone()), mx = body.worldToLocal(bx.max.clone());
+    const L = mx.x - mn.x, W = Math.abs(mx.z - mn.z), y0 = Math.min(mn.y, mx.y), h = Math.abs(mx.y - mn.y);
+    const g = slot === 'bumper' ? buildPartModel(ri.id, ri.cond, {w:W * 0.92}) : buildPartModel(ri.id, ri.cond, {len:L * 0.62, w:W * 0.98});
+    if (slot === 'bumper') g.position.set(Math.max(mx.x, mn.x) + 0.04, y0 + Math.min(0.32, h * 0.3), 0);
+    else g.position.set((mn.x + mx.x) / 2, y0 + Math.min(0.42, h * 0.35), 0);
+    body.add(g); parts[slot] = g; tag(g, slot);
+  }
   const tI = car.turbo && inst(car.turbo);
   if (tI && parts.engine) {
     const tg = buildPartModel(tI.id, tI.cond);
@@ -3514,7 +3558,7 @@ function openJunk() {
 
 /* ---------- Valikko & Papu ---------- */
 function openMenu() {
-  openSheet(`<h2>Valikko</h2><div class="sub">Max Newton · demo 36 · ${state.shop ? 'oikea peli (osat ostetaan)' : 'testipeli (hylly täynnä)'}</div>
+  openSheet(`<h2>Valikko</h2><div class="sub">Max Newton · demo 38 · ${state.shop ? 'oikea peli (osat ostetaan)' : 'testipeli (hylly täynnä)'}</div>
     <div class="sub" style="margin-top:8px">Kuljettajan nimi</div>
     <div class="nameRow"><input id="mName" type="text" maxlength="20" autocomplete="off" spellcheck="false" value="${esc(playerName())}" aria-label="Kuljettajan nimi"><button class="btn pri" id="mNameOk">Tallenna</button></div>
     <div class="sub" style="margin-top:8px">Vaikeustaso</div>
@@ -8894,7 +8938,7 @@ Object.assign(window.__paja, {carValue, SURFACES, surfaceShow, famOf, famTopTier
 // Ajomalli: nykyinen pituussuuntainen fysiikka (physStep: moottori, vaihteisto, pito, sutiminen) + kaksipyörämalli sivuttais-
 // dynamiikkaan. Renkaalla on yksi pitobudjetti (kitkaympyrä): kaasu tai jarru vie pitoa sivuttaissuunnasta ja päinvastoin.
 // Rata on suljettu Catmull-Rom-käyrä; radan ulkopuolella (nurmi) pito laskee ja vierintävastus kasvaa, kauempana on penkka.
-var RALLY = {on:false, surface:'gravel', world:null, pts:[], n:0, w:9.5, phase:'menu', lap:0, laps:[], idx:0, cp:false, wheel:0, wheelMax:110, wheelDown:false,
+var RALLY = {on:false, surface:'gravel', world:null, pts:[], n:0, w:9.5, phase:'menu', lap:0, laps:[], idx:0, cp:false, wheel:0, wheelMax:85, wheelDown:false,
   steerKey:0, Fx:0, off:false, bumpT:0, dustAcc:0, stuckT:0, LAPS:2,
   props:[], propG:null, dmg:0, chaos:0, combo:0, comboT:-9, broke:{}, wrecked:false, missT:0, pull:1};
 Object.assign(SURFACES, {
@@ -9155,7 +9199,7 @@ function rallyProps(dt) {
     if (p.on && !p.awake && p.active && (!p.on.active || p.on.awake)) { p.awake = true; p.on = null; }  // alempi laatikko lähti alta
     if (!p.awake || !p.active) continue;
     const m = p.m;
-    p.v.y -= 9.8 * dt; m.position.addScaledVector(p.v, dt);
+    p.v.y -= 14 * dt; m.position.addScaledVector(p.v, dt);  // kappaleille hieman voimistettu painovoima
     const wl = p.w.length(); if (wl > 1e-3) { m.quaternion.premultiply(_pq.setFromAxisAngle(_pa.copy(p.w).multiplyScalar(1 / wl), wl * dt)); }
     m.updateMatrixWorld(true); _pb.setFromObject(m);
     const gy = rallyGroundAt(m.position.x, m.position.z), ground = _pb.min.y <= gy + 0.002;
@@ -9166,7 +9210,8 @@ function rallyProps(dt) {
     if (ground) {
       const hs = Math.hypot(p.v.x, p.v.z), dec = p.mu * 9.8 * dt;
       if (hs > 1e-4) { const k = Math.max(0, hs - dec) / hs; p.v.x *= k; p.v.z *= k; }
-      if (p.ball) p.w.set(p.v.z / p.br, 0, -p.v.x / p.br);  // lumipallo vierii
+      if (p.ball) { p.w.set(p.v.z / p.br, 0, -p.v.x / p.br);  // lumipallo ja irronnut pyörä vierivät
+        if (p.wheel && hs < 2.5) { p.ball = false; const k = 1 / Math.max(hs, 0.3); p.w.set(p.v.x * k * 2.2, 0, p.v.z * k * 2.2); } }
       else p.w.multiplyScalar(Math.max(0, 1 - dt * 4));
       if (hs < 0.12 && Math.abs(p.v.y) < 0.2 && p.w.length() < 0.3) { p.rest += dt; if (p.rest > 0.4) { p.awake = false; p.v.set(0, 0, 0); p.w.set(0, 0, 0); } } else p.rest = 0;
     } else p.rest = 0;
@@ -9238,7 +9283,7 @@ function rallyCollide(S) {
       if (vn < -0.2 && p.kind === 'barrel' && o === offs[0] && rallyCanLoad(p)) continue;  // magneettitykki nappaa tynnyrin
       if (vn < -0.2) {
         const spd = -vn;
-        if (K.brk && spd > K.brk) {
+        if (K.brk && spd > K.brk * (R.spikes && o === offs[0] ? 0.5 : 1)) {  // piikit hajottavat helpommin
           const J = Math.min(K.brkJ, (K.mass * 0.25) * spd);
           impulse(-nx * J, -nz * J, hit.qx - S.px, hit.qz - S.pz);
           propBreak(p, pvx(), pvz(), spd);
@@ -9265,23 +9310,26 @@ function rallyCollide(S) {
   // Sora-Seppo
   for (const o of offs) {
     const cx = S.px + cy * o, cz = S.pz - sy * o, ox = cx - S.px, oz = cz - S.pz;
-    const ah = raiCollideCircle(cx, cz, rc, vx + S.r * oz, vz - S.r * ox);
+    const ah = raiCollideCircle(cx, cz, rc, vx + S.r * oz, vz - S.r * ox, R.spikes && o === offs[0]);
     if (ah) { S.px += ah.px; S.pz += ah.pz; if (ah.Jx || ah.Jz) impulse(ah.Jx, ah.Jz, ox, oz); }
   }
   // takaisin auton koordinaatteihin: eteen (cos, -sin), vasen (-sin, -cos)
   const nv = vx * cy - vz * sy, nL = -vx * sy - vz * cy;
   if (dvMax > 0) {
     S.v = R.rev ? Math.min(0, nv) : Math.max(0, nv); S.vL = R.rev ? 0 : nL; if (dvMax > 1) S.vw = R.rev ? S.v : Math.min(S.vw, S.v + 1);
-    if (dvMax > 2) rallyDamage((dvMax - 2) * 1.8, hitX, hitZ, nIn, dvMax);
+    const front = R.spikes && ((hitX - S.px) * cy - (hitZ - S.pz) * sy) > 0.6;  // piikkipuskuri ottaa keulan iskuja vastaan
+    if (dvMax > 2) rallyDamage((dvMax - 2) * 1.8 * (front ? 0.6 : 1), hitX, hitZ, nIn, dvMax * (front ? 0.75 : 1));
   }
   return dvMax;
 }
 // ---------- Vauriot ----------
 // 0–100 %. Yli 30 %: teho laskee. Yli 45 %: auto vetää sivulle. Yli 60 %: moottori savuaa. Yli 70 %: nykii.
 // 15 %: valot irtoavat, 25 %: siipi, 40 %: pakoputki. 100 %: auto romuttuu ja ajo päättyy.
-function rallyDamage(amt, x, z, nIn, dv) {
+function rallyDamage(amt, x, z, nIn, dv, landing) {
   const R = RALLY, D = DRV; if (amt <= 0 || R.wrecked) return;
+  amt /= R.dur || 1;  // heikko auto hajoaa nopeammin
   R.dmg = Math.min(100, R.dmg + amt);
+  rallyBreakBits(x, z, dv, landing);
   if (dv > 3) { rallyDent(x, z, nIn, Math.min(1, amt / 12)); cam.shake = Math.max(cam.shake, Math.min(0.45, dv * 0.03)); }
   for (const [lim, slot, txt] of [[15, 'lights', 'Valot irtosivat!'], [25, 'spoiler', 'Siipi irtosi!'], [40, 'exhaust', 'Pakoputki irtosi!']]) if (R.dmg >= lim && car3d.parts[slot]) { rallyDrop(slot); msg(txt, 'warn', 1.2); }
   if (R.dmg >= 100) {
@@ -9293,18 +9341,82 @@ function rallyDamage(amt, x, z, nIn, dv) {
 // Irtoava osa: siirtyy auton rungosta maailmaan omaksi kappaleekseen
 function rallyDrop(slot) {
   const R = RALLY, D = DRV, g = car3d.parts[slot]; if (!g || !g.parent) return;
-  R.propG.attach(g); car3d.parts[slot] = null;
+  R.propG.attach(g); car3d.parts[slot] = null; if (slot === 'exhaust') R.loud = true;
   const cy = Math.cos(D.S.yaw), sy = Math.sin(D.S.yaw);
   R.props.push({kind:'piece', m:g, own:true, v:new THREE.Vector3(D.S.v * cy * 0.7 + rnd(-1.5, 1.5), rnd(2, 4), -D.S.v * sy * 0.7 + rnd(-1.5, 1.5)), w:new THREE.Vector3(rnd(-7, 7), rnd(-5, 5), rnd(-7, 7)),
     mass:10, r:0.3, mu:0.7, L:0, hit:true, hitT:D.t, awake:true, rest:0, active:true});
   sfx.clank();
+}
+// ---------- Konkreettinen hajoaminen ----------
+// Kestävyys rungon mukaan (kevyt ja ohut runko hajoaa helpommin), kuluneet renkaat heikentävät.
+const RALLY_DUR = {pirpana:0.75, kupla:0.7, hiekkis:0.85, maxtf:0.6, nuoli:0.8, lava:1.15, paku:1.25, monsteri:1.5, vanha:0.75, amfibi:1.2, rekku:1.8};
+function rallyDur() { const ch = inst(state.car.chassis).id, wI = state.car.wheels && inst(state.car.wheels), aI = state.car.armor && inst(state.car.armor);
+  return (RALLY_DUR[ch] || 1) * (0.7 + 0.3 * (wI?.cond ?? 1)) / (aI ? PARTS[aI.id].armor || 1 : 1); }  // panssari jakaa vauriot
+const rallyDurTxt = d => d < 0.8 ? 'heikko: pyörät ja palat irtoavat helposti' : d < 1.1 ? 'kohtalainen' : 'vahva: kestää kovempiakin kolhuja';
+// Iskun jälkeen: palat irtoavat osumakohdasta, kova isku irrottaa pyörän
+function rallyBreakBits(x, z, dv, landing) {
+  const R = RALLY; if (!car3d || x == null || !dv) return;
+  const dur = R.dur || 1;
+  if (!landing && dv > 5 * dur) rallyChip(x, z, dv > 9 * dur ? 2 : 1);
+  const thr = 11 * dur;
+  if ((R.lost?.length || 0) < 2 && (dv > thr || (R.dmg > 55 && dv > thr * 0.55 && Math.random() < 0.5) || (landing && dv > 11 * dur))) rallyLoseWheel(landing ? null : x, z);
+}
+// Pienet rungon palat (puskurit, lokasuojat, peilit...) irtoavat lähimpänä osumaa
+function rallyChip(x, z, n) {
+  const R = RALLY, D = DRV, S = D.S, ch = car3d?.parts.chassis; if (!ch) return;
+  car3d.root.updateMatrixWorld(true); const c = [];
+  ch.traverse(o => {
+    if (!o.isMesh || o.isInstancedMesh || o.userData.chipped) return;
+    if (!o.geometry.boundingSphere) o.geometry.computeBoundingSphere();
+    const r = o.geometry.boundingSphere.radius * o.matrixWorld.getMaxScaleOnAxis(); if (r > 0.7 || r < 0.05) return;
+    _pv.copy(o.geometry.boundingSphere.center).applyMatrix4(o.matrixWorld); const d = Math.hypot(_pv.x - x, _pv.z - z); if (d < 1.4) c.push([d, o, r]);
+  });
+  c.sort((a, b) => a[0] - b[0]);
+  const cy = Math.cos(S.yaw), sy = Math.sin(S.yaw), vx = S.v * cy - (S.vL || 0) * sy, vz = -S.v * sy - (S.vL || 0) * cy;
+  for (const [, o, r] of c.slice(0, n)) {
+    o.userData.chipped = true; R.propG.attach(o); R.chipN = (R.chipN || 0) + 1;
+    const ax = o.position.x - S.px, az = o.position.z - S.pz, al = Math.hypot(ax, az) || 1;
+    R.props.push({kind:'piece', m:o, own:true, v:new THREE.Vector3(vx * 0.6 + ax / al * rnd(2, 4), rnd(2, 4.5), vz * 0.6 + az / al * rnd(2, 4)), w:new THREE.Vector3(rnd(-9, 9), rnd(-6, 6), rnd(-9, 9)),
+      mass:6, r:Math.max(0.15, r * 0.6), mu:0.7, L:0, hit:true, hitT:D.t, awake:true, rest:0, active:true});
+  }
+  if (c.length) sfx.clank();
+}
+// Pyörä irtoaa ja vierii omia teitään. Auton kulma roikkuu ja raapii tietä: pito laskee, auto vetää sivulle, kipinöitä.
+function rallyLoseWheel(x, z) {
+  const R = RALLY, D = DRV, S = D.S, ws = car3d?.wheels; if (!ws) return;
+  let bi = -1, bd = Infinity; const wp = new THREE.Vector3();
+  ws.forEach((w, i) => { if (w.userData.lost) return; w.getWorldPosition(wp); const d = x == null ? Math.random() : (wp.x - x) ** 2 + (wp.z - z) ** 2; if (d < bd) { bd = d; bi = i; } });
+  if (bi < 0) return;
+  const w = ws[bi]; w.getWorldPosition(wp); const lp = car3d.root.worldToLocal(wp.clone());
+  const side = Math.sign(w.position.z) || 1, front = bi < 2;
+  w.userData.lost = true; R.propG.attach(w);
+  const cy = Math.cos(S.yaw), sy = Math.sin(S.yaw), vx = S.v * cy - (S.vL || 0) * sy, vz = -S.v * sy - (S.vL || 0) * cy, rx = sy * side, rz = cy * side;  // oikea = (sin, cos)
+  const Rw = w.userData.R || 0.35;
+  R.props.push({kind:'piece', m:w, own:true, wheel:true, ball:true, br:Rw, v:new THREE.Vector3(vx * 1.05 + rx * 2.5, 1.5, vz * 1.05 + rz * 2.5), w:new THREE.Vector3(),
+    mass:25, r:Rw * 0.9, mu:0.15, L:0, hit:true, hitT:D.t, awake:true, rest:0, active:true});
+  R.lost.push({i:bi, side, front, lp});
+  msg(front ? 'ETUPYÖRÄ IRTOSI!' : 'TAKAPYÖRÄ IRTOSI!', 'bad', 1.8); sfx.clank(); sfx.crunch(); cam.shake = Math.max(cam.shake, 0.3); rallyChaos(30, 'PYÖRÄ IRTI');
+}
+function rallyLostPull() { let p = 0; for (const l of RALLY.lost || []) p -= l.side * (l.front ? 0.14 : 0.08); return p; }
+function rallyLostDrive(drive) {
+  let k = 1; for (const l of RALLY.lost || []) k *= drive === 'AWD' ? 0.78 : (drive === 'TV') === !l.front ? 0.6 : 0.9; return Math.max(0.4, k);
+}
+// Raapiva kulma: kipinät ja kilinä
+function rallyScrape(dt) {
+  const R = RALLY, S = DRV.S; if (!R.lost?.length || R.air || Math.abs(S.v) < 2) return;
+  for (const l of R.lost) {
+    const p = car3d.root.localToWorld(l.lp.clone()); p.y = (S.y || 0) + 0.12;
+    l.acc = (l.acc || 0) + dt * Math.abs(S.v) * 1.6;
+    while (l.acc > 1) { l.acc -= 1; puff(p, {color:Math.random() < 0.5 ? 0xffb040 : 0xffe08a, add:true, op:0.9, size:0.07, life:0.35, grow:0.3, g:9, drag:1.5, v:new THREE.Vector3(rnd(-3, 3), rnd(1, 3.5), rnd(-3, 3))}); }
+  }
+  R.scrT = (R.scrT || 0) + dt * Math.abs(S.v); if (R.scrT > 4) { R.scrT = 0; sfx.clink?.(0.35); }
 }
 // Lommo: rungon pisteet painuvat sisään osumakohdan ympäriltä
 function rallyDent(x, z, nIn, sev) {
   const ch = car3d?.parts.chassis; if (!ch || !nIn) return;
   const nl = Math.hypot(nIn[0], nIn[1]) || 1, wp = new THREE.Vector3(x, (DRV.S.y || 0) + car3d.axleY + car3d.def.height * 0.3, z), wd = new THREE.Vector3(nIn[0] / nl, 0, nIn[1] / nl);
   const Rd = 0.55 + sev * 0.35, amt = 0.05 + sev * 0.11;
-  ch.updateMatrixWorld(true);
+  car3d.root.updateMatrixWorld(true);
   ch.traverse(o => {
     if (!o.isMesh || o.isInstancedMesh) return;
     o.geometry.computeBoundingSphere(); _pv.copy(o.geometry.boundingSphere.center).applyMatrix4(o.matrixWorld);
@@ -9345,7 +9457,7 @@ function rallyUI() {
     #rGauge .rpm{position:relative;width:96px;height:10px;border-radius:5px;background:#2a2c30;overflow:hidden}#rGauge .rpm i{position:absolute;left:0;top:0;bottom:0;width:0;background:linear-gradient(90deg,#3fd47a,#ffc21a 70%,#ff3b30)}#rGauge .rpm u{position:absolute;top:0;bottom:0;width:2px;background:#ff3b30}
     #rGauge .tp{display:flex;gap:3px;align-items:flex-end;height:22px}#rGauge .tp i{position:relative;width:7px;height:22px;border-radius:3px;background:#2a2c30;overflow:hidden}#rGauge .tp i b{position:absolute;left:0;right:0;bottom:0;background:#4aa3ff}
     #rGauge .tp em{font-style:normal;font-size:9px;font-weight:800;color:#9aa1ab;writing-mode:vertical-rl;transform:rotate(180deg)}
-    @media (max-aspect-ratio:1/1){#rGauge{left:calc(env(safe-area-inset-left,0px) + 12px);transform:none;top:calc(env(safe-area-inset-top,0px) + 100px)}#drive.rally #rPop#rPop{top:calc(env(safe-area-inset-top,0px) + 152px)}}
+    @media (max-aspect-ratio:1/1){#rGauge{left:calc(env(safe-area-inset-left,0px) + 12px);transform:none;top:calc(env(safe-area-inset-top,0px) + 100px)}#drive.rally #rPop#rPop{top:calc(env(safe-area-inset-top,0px) + 196px)}}
     #rWpns{position:absolute;right:calc(env(safe-area-inset-right,0px) + 122px);bottom:calc(env(safe-area-inset-bottom,0px) + 18px);display:flex;flex-direction:column;gap:12px;align-items:center}
     #rWpns button{width:76px;height:76px;border-radius:50%;border:3px solid #22252a;font-family:var(--f-display);font-size:14px;line-height:1.05;color:#fff;box-shadow:0 6px 0 #111,0 10px 24px #000a;touch-action:none;display:flex;flex-direction:column;align-items:center;justify-content:center}
     #rWpns button small{font-family:system-ui;font-size:9px;font-weight:700;opacity:.8}
@@ -9360,7 +9472,10 @@ function rallyUI() {
     #rPanel .rp.hot em{color:#ff3b30}
     #rPop{position:absolute;left:calc(env(safe-area-inset-left,0px) + 14px);top:calc(env(safe-area-inset-top,0px) + 66px);transform-origin:left center;pointer-events:none;font-family:var(--f-display);font-size:24px;color:#ffc21a;text-shadow:0 3px 0 #7a4f00,0 0 18px #000;white-space:nowrap;opacity:0}
     #rPop em{font-style:normal;color:#ff5a1f}
-    #drive.rally #rPop{top:calc(env(safe-area-inset-top,0px) + 104px)}@media (max-width:520px){#rPop{font-size:20px}}
+    #rLock{position:absolute;width:58px;height:58px;margin:-29px 0 0 -29px;border:3px solid #ff3b30;border-radius:50%;box-shadow:0 0 12px #ff3b30aa,inset 0 0 8px #ff3b3088;pointer-events:none;animation:rlk 0.9s ease-in-out infinite}
+    #rLock::after{content:'LUKITTU';position:absolute;left:50%;top:100%;transform:translateX(-50%);margin-top:4px;font:800 11px system-ui;letter-spacing:.06em;color:#ff3b30;text-shadow:0 1px 3px #000}
+    @keyframes rlk{50%{transform:scale(0.86)}}
+    #drive.rally #rPop{top:calc(env(safe-area-inset-top,0px) + 140px)}@media (max-width:520px){#rPop{font-size:20px}}
     #rPop.pop{animation:rpop 1.2s ease-out forwards}@keyframes rpop{0%{opacity:0;transform:translateY(10px) scale(.7)}12%{opacity:1;transform:translateY(0) scale(1.15)}25%{transform:scale(1)}75%{opacity:1}100%{opacity:0;transform:translateY(-14px)}}`;
   document.head.appendChild(st);
   const w = document.createElement('div'); w.id = 'rWheel'; w.hidden = true; w.innerHTML = '<b></b><i></i>'; $('drive').appendChild(w);
@@ -9378,6 +9493,7 @@ function rallyUI() {
   pn.innerHTML = '<div class="rp" id="rDmgR"><span>VAURIOT</span><i><b id="rDmgB"></b></i><em id="rDmg">0 %</em></div><div class="rp ch"><span>KAAOS</span><i><b id="rComboB"></b></i><em id="rChaos">0</em></div><div class="rp" id="rPosR"><span>SIJA</span><em id="rPos" style="flex:1;text-align:left">–</em></div>';
   $('xTop').appendChild(pn);
   const pp = document.createElement('div'); pp.id = 'rPop'; pp.hidden = true; $('drive').appendChild(pp);
+  const lk = document.createElement('div'); lk.id = 'rLock'; lk.hidden = true; $('drive').appendChild(lk);
   let a0 = 0, w0 = 0, pid = null;
   const ang = e => { const r = w.getBoundingClientRect(); return Math.atan2(e.clientY - (r.top + r.height / 2), e.clientX - (r.left + r.width / 2)) * 180 / Math.PI; };
   w.addEventListener('pointerdown', e => { e.preventDefault(); pid = e.pointerId; w.setPointerCapture(pid); a0 = ang(e); w0 = RALLY.wheel; RALLY.wheelDown = true; });
@@ -9406,6 +9522,7 @@ function rallySheet() {
   const best = state.rally?.best || {}, chb = state.rally?.chaos || {};
   driveSheet(`<h2>Ralli <small style="font-size:14px;color:var(--muted)">demo</small></h2><div class="sub">Pieni rata · ${Math.round((RALLY.len || 1100) / 10) * 10} m kierros · ${RALLY.LAPS} kierrosta · vastassa Sora-Seppo (keltainen Kupla)</div>
     <p style="margin:6px 0">Vasen peukalo pyörittää isoa rattia vasemmasta alakulmasta, oikealla kaasu ja jarru. Jarru pohjassa paikallaan = peruutus. Vaihteet vaihtuvat automaattisesti. Näppäimistöllä nuolet tai WASD. Radalla on mäkiä ja hyppyri.</p>
+    <p style="margin:6px 0"><b>Autosi kestävyys:</b> ${rallyDurTxt(rallyDur())}.</p>
     <p style="margin:6px 0"><b>Aseet:</b> vihreistä ?-laatikoista löytyy öljyhana, savupommi tai ilotulite (välilyönti). Magneettitykki nappaa tynnyrin, kun ajat sitä päin, ja ampuu sen (F).</p>
     <p style="margin:6px 0"><b>Kaaos-metri:</b> paalit, tynnyrit, kartiot, aidat, laatikot, postilaatikot, huussit ja linnunpelättimet (lumella lumiukot) antavat pisteitä. Peräkkäiset osumat kertovat pisteet. Varo: kolhut kasvattavat vaurioita, ja 100 %:ssa auto romuttuu.</p>
     <div class="modes">${RALLY_SURF.map(([id, nm, info]) => `<button class="mode${RALLY.surface === id ? ' duel' : ''}" data-surf="${id}"><b>${nm}${best[id] ? ` · paras ${rallyFmt(best[id])}` : ''}${chb[id] ? ` · kaaos ${chb[id]}` : ''}</b><small>${info}</small></button>`).join('')}</div>
@@ -9421,6 +9538,7 @@ function rallyStart(surface) {
   if (!D.on) return;
   rallyBuild(); raceClear(); rallyObstacles(); rebuildCar(); rallyPropsSurface(surface);
   R.dmg = 0; R.chaos = 0; R.combo = 0; R.comboT = -9; R.broke = {}; R.wrecked = false; R.missT = 0; R.pull = Math.random() < 0.5 ? -1 : 1; R.smokeAcc = 0;
+  R.spikes = !!(state.car.bumper && inst(state.car.bumper)); R.lost = []; R.loud = false; R.dur = rallyDur(); R.scrT = 0; R.chipN = 0;
   R.rev = false; R.revT = 0; R.air = false; R.grade = 0; R.tPitch = 0; R.tRoll = 0; R.offStopT = 0;
   R.surface = surface; R.on = true; R.phase = 'count'; R.lap = 0; R.laps = []; R.cp = false; R.idx = 0; R.wheel = 0; R.Fx = 0; R.off = false; R.stuckT = 0;
   R.ribbon.material = R.mats[surface] || R.mats.gravel; R.shoulder.material = R.shoulderMats[surface] || R.shoulderMats.gravel; R.terrain.material = R.outer.material = surface === 'snow' ? R.tMats.snow : R.tMats.grass;
@@ -9442,7 +9560,7 @@ function rallyStop() {
   if (R.world) R.world.visible = false; if (track) track.visible = true;
   if (scene.fog) scene.fog.color.set(0xcfe6f6);
   rallyWpnReset(false); raiStop();
-  $('xShift').hidden = false; if ($('rWheel')) { $('rWheel').hidden = true; $('rReset').hidden = true; $('rPanel').hidden = true; $('rPop').hidden = true; $('rGauge').hidden = true; $('rWpns').hidden = true; }
+  $('xShift').hidden = false; if ($('rWheel')) { $('rWheel').hidden = true; $('rReset').hidden = true; $('rPanel').hidden = true; $('rPop').hidden = true; $('rGauge').hidden = true; $('rWpns').hidden = true; $('rLock').hidden = true; }
   $('drive').classList.remove('rally'); $('brake').textContent = 'JARRU'; $('dCam').style.display = ''; $('xTgt').hidden = true; $('xCount').hidden = true;
   if (car3d) { car3d.root.rotation.set(0, 0, 0); if (car3d.body) car3d.body.rotation.set(0, 0, 0); for (const w of car3d.wheels) w.rotation.y = 0; }
   D.camPos.set(0, 0, 0); D.tGreen = null;
@@ -9486,7 +9604,7 @@ function rallyStep(S, P, inp, h) {
   }
   // ohjauskulma: pienenee vauhdissa, jotta ratti ei nykäise
   const dmax = 0.6 / (1 + S.v / 22), pull = R.dmg > 45 ? (R.dmg - 45) / 55 * 0.07 * R.pull : 0;  // vääntynyt etupää vetää sivulle
-  S.steer += (clamp(inp.steer + pull, -1, 1) * dmax - S.steer) * Math.min(1, h * 12);
+  S.steer += (clamp(inp.steer + pull + rallyLostPull(), -1, 1) * dmax - S.steer) * Math.min(1, h * 18);
   const vx = Math.max(S.v, 0.4), vL = S.vL || 0, r = S.r || 0;
   // sivuttaispito: renkaan pito ilman vetotapakerrointa, pinta mukana (P.grip sisältää pinnan)
   const oil = R.onOil ? 0.3 : 1, air = R.air ? 0.03 : 1;  // öljyllä pito pettää, ilmassa sitä ei ole
@@ -9494,8 +9612,9 @@ function rallyStep(S, P, inp, h) {
   const Fmax = mu * m * G9 * 0.5;
   const Fx = R.Fx || 0, fxF = drive === 'EV' ? Fx : drive === 'AWD' ? Fx * 0.5 : 0, fxR = drive === 'TV' ? Fx : drive === 'AWD' ? Fx * 0.5 : 0;
   const bk = inp.brake ? 1 : 0;
-  const capF = Fmax * (1 + 0.12 * bk) * Math.sqrt(Math.max(0.05, 1 - (fxF / Fmax) ** 2));
-  const capR = Fmax * (1 - 0.25 * bk) * Math.sqrt(Math.max(0.05, 1 - (fxR / Fmax) ** 2));
+  const lf = (R.lost || []).filter(l => l.front).length, lr = (R.lost || []).length - lf;
+  const capF = Math.max(0.25, 1 - 0.5 * lf) * Fmax * (1 + 0.12 * bk) * Math.sqrt(Math.max(0.05, 1 - (fxF / Fmax) ** 2));
+  const capR = Math.max(0.25, 1 - 0.5 * lr) * Fmax * (1 - 0.25 * bk) * Math.sqrt(Math.max(0.05, 1 - (fxR / Fmax) ** 2));
   const C = Fmax * 12;
   const af = Math.atan2(vL + a * r, vx) - S.steer, ar = Math.atan2(vL - b * r, vx);
   const sk = Math.min(1, S.v / 2.5);  // paikallaan ei synny sivuttaisvoimaa
@@ -9512,7 +9631,7 @@ function rallyStep(S, P, inp, h) {
   const latUse = Math.min(1, Math.abs(drive === 'TV' ? Fyr : drive === 'AWD' ? (Fyf + Fyr) / 2 : Fyf) / Fmax);
   // luistonesto: isossa luisussa vetovoimaa rajoitetaan, jotta perän saa kiinni; pituuspito ×1,3 (kiihdytysradan 0,62-kerroin on lähtöä varten)
   const tc = Math.abs(ar) > 0.3 ? 0.6 : 1;
-  const Pr = Object.assign({}, P, {gripF:P.gripF * 1.3 * tc * Math.sqrt(Math.max(0.05, 1 - latUse * latUse)) * (R.off ? 0.6 : 1) * oil * air, crr:P.crr + (R.off ? 0.1 : 0), cda:P.cda + (R.off ? 1.6 : 0), brakeF:P.brakeF * (R.off ? 0.7 : 1) * air});
+  const Pr = Object.assign({}, P, {gripF:P.gripF * 1.3 * tc * rallyLostDrive(drive) * Math.sqrt(Math.max(0.05, 1 - latUse * latUse)) * (R.off ? 0.6 : 1) * oil * air, crr:P.crr + (R.off ? 0.1 : 0) + 0.05 * (R.lost?.length || 0), cda:P.cda + (R.off ? 1.6 : 0), brakeF:P.brakeF * (R.off ? 0.7 : 1) * air});
   const v0 = S.v;
   const pw = R.dmg > 30 ? 1 - (R.dmg - 30) / 70 * 0.55 : 1;  // vaurioitunut auto: tehoa vähemmän
   physStep(S, Pr, {thr:inp.thr * pw * (R.missT > 0 ? 0.1 : 1), brake:inp.brake, held:false}, h);
@@ -9530,12 +9649,14 @@ function rallyPlace(dt, accel) {
   root.position.set(S.px, (S.y || 0) + 0.04, S.pz);
   D.pitch = (D.pitch || 0) + (clamp(accel * 0.004, -0.05, 0.05) - (D.pitch || 0)) * Math.min(1, dt * 6);
   R.vP = (R.vP ?? 0) + ((R.tPitch || 0) - (R.vP ?? 0)) * Math.min(1, dt * 10); R.vR = (R.vR ?? 0) + ((R.tRoll || 0) - (R.vR ?? 0)) * Math.min(1, dt * 10);
-  root.rotation.order = 'YZX'; root.rotation.set(R.vR, S.yaw, D.pitch + R.vP);
+  let lr0 = 0, lp0 = 0; for (const l of R.lost || []) { lr0 += l.side * 0.08; lp0 += l.front ? -0.06 : 0.05; }  // puuttuva pyörä: kulma roikkuu
+  root.rotation.order = 'YZX'; root.rotation.set(R.vR + lr0, S.yaw, D.pitch + R.vP + lp0); if (R.lost?.length) root.position.y -= 0.12 * R.lost.length;
   const roll = clamp(S.v * S.r * 0.012, -0.09, 0.09);
   D.roll = (D.roll || 0) + (roll - (D.roll || 0)) * Math.min(1, dt * 6);
   const shk = D.P.dead ? 0 : shakeAmp(D.st, D.thr) + ((R.off ? 0.004 : R.surface === 'gravel' ? 0.0015 : 0) + (R.dmg > 50 ? (R.dmg - 50) * 0.00006 : 0)) * Math.min(1, S.v / 8);
   if (car3d.body) { car3d.body.position.set(rnd(-1, 1) * shk * 0.5, car3d.axleY + rnd(-1, 1) * shk, rnd(-1, 1) * shk * 0.5); car3d.body.rotation.set(D.roll + rnd(-1, 1) * shk * 0.6, 0, 0); }
   car3d.wheels.forEach((w, i) => {
+    if (w.userData.lost) return;
     const side = Math.sign(w.position.z) || 1, Rr = w.userData.R || 0.35, vv = i >= n - 2 ? S.vw : S.v;
     w.userData.spin.rotation.z += (side > 0 ? -1 : 1) * vv / Rr * dt;
     w.rotation.y = i < 2 ? S.steer : 0;
@@ -9575,7 +9696,7 @@ function updateRally(dt, now) {
   }
   // syötteet: ratti (kosketus tai näppäimet), kaasu ja jarru
   const kl = !sheet && (K.ArrowLeft || K.KeyA), kr = !sheet && (K.ArrowRight || K.KeyD);
-  if (kl || kr) R.wheel += ((kl ? 1 : -1) * R.wheelMax - R.wheel) * Math.min(1, dt * 6);
+  if (kl || kr) R.wheel += ((kl ? 1 : -1) * R.wheelMax - R.wheel) * Math.min(1, dt * 8);
   else if (!R.wheelDown) R.wheel += (0 - R.wheel) * Math.min(1, dt * 9);
   const wEl = $('rWheel'); if (wEl) wEl.style.transform = `rotate(${-R.wheel}deg)`;
   const steer = R.wheel / R.wheelMax;
@@ -9643,13 +9764,14 @@ function updateRally(dt, now) {
   if (!P.electric && !S.gbBroken && gI) { S.Tg = heatStep(S.Tg, D.thr > 0.05 ? S.Lgb : 0, 1, D.thr, dt); S.TgMax = Math.max(S.TgMax, S.Tg); if (S.Tg >= TEMP_RED) { gI.cond = 0; S.gbBroken = true; S.gear = 0; S.pending = null; gearboxFailure(); } }
   D.saveT = (D.saveT || 0) + dt; if (D.saveT > 1) { D.saveT = 0; save(); }
   // äänet
-  const exK = D.st.exK || 'orig';
+  const exK = R.loud ? 'suora' : D.st.exK || 'orig';  // irronnut pakoputki: suora ääni
   if (!P.dead) engineSound.set(S.rpm, S.shiftT > 0 ? D.thr * 0.3 : D.thr, P.boostSet, S.L, exK, P.boostSet > 0 ? Math.max(0, S.boost) / Math.max(0.3, P.boostSet) : 0);
   if (cut && now - D.cutT > 90) { D.cutT = now; engineSound.cut(); }
   const slide = clamp((S.slideK || 0) / 0.35, 0, 1) * Math.min(1, S.v / 6);
   squeal.set(R.surface === 'asphalt' ? Math.max(S.slip ? 0.5 : 0, slide * 0.8) : slide * 0.15);
   // pöly ja roiskeet: sora pölyää, lumi pöllyää, asfaltilla savu sutiessa
-  const rear = car3d.wheels.slice(-2);
+  const rear = car3d.wheels.filter(w => !w.userData.lost).slice(-2);
+  rallyScrape(dt);
   if (R.surface !== 'asphalt' || S.slip || slide > 0.6) {
     R.dustAcc += dt * (R.surface === 'asphalt' ? 8 : 4 + Math.min(10, S.v * 0.5) + slide * 10 + (S.slip ? 8 : 0));
     while (R.dustAcc > 1) { R.dustAcc -= 1;
@@ -9702,6 +9824,7 @@ function rallyResult() {
     <div class="slip"><div class="slipH"><span>KAAOS-METRI</span><span>${R.chaos} p${chRec ? ' · ENNÄTYS' : ''}</span></div>
       ${tally.map(([n, c]) => `<div class="slipR"><span>${n}</span><b>${c}</b></div>`).join('') || '<div class="slipR"><span>Ei kolhuja. Siisti suoritus.</span><b>0</b></div>'}
       <div class="slipR"><span>Vauriot</span><b>${Math.floor(R.dmg)} %</b></div>
+      ${R.lost?.length || R.chipN ? `<div class="slipR"><span>Irronneet osat${R.lost.length ? ` (${R.lost.length} pyörää)` : ''}</span><b>${R.lost.length + (R.chipN || 0)}</b></div>` : ''}
       <div class="slipR big"><span>Paras kaaos</span><b>${cb[R.surface] || 0}</b></div></div>
     ${broke ? `<p style="color:#ffb1a6;font-weight:700">${broke}</p>` : ''}
     <p style="color:var(--muted)">Demo: rata on sama kaikilla alustoilla. Mekaanikko oikoi lommot ja kiinnitti irronneet osat.</p>
@@ -9720,6 +9843,8 @@ Object.assign(window.__paja, {RALLY, rallyStart, rallyStop, rallySheet, rallyRes
 // Maasto on korkeusruudukko (4 m välein). Tie noudattaa maaston muotoja tasoitettuna, eikä tiellä ole sivukallistusta.
 // Tien vieressä maasto on tien tasossa, kauempana luonnollisissa muodoissaan, ja noin 38–48 m:n päässä nousee valli,
 // joka on kentän raja. Radalla on yksi hyppyrinyppylä. Auton ja kappaleiden korkeus luetaan samasta datasta.
+// Ilmalennon painovoima: kaksinkertainen, jotta hyppy tuntuu napakalta eikä auto leijaile (pelien tapa; mittakaava näyttää muuten hidastetulta)
+const RG = 19.6;
 const RBOUND = 64;  // kentän raja tien keskiviivasta (m); valli nousee 58–70 m
 const sm01 = t => { t = clamp(t, 0, 1); return t * t * (3 - 2 * t); };
 function rallyNatural(x, z) {
@@ -9779,8 +9904,8 @@ function rallyTerrain(g, grassMat, snowMat) {
   // jyrkkyys korkeintaan noin 12 %
   let gmax = 0; for (let i = 0; i < n; i++) { const j = (i + 6) % n, ds = Math.hypot(pts[j].x - pts[i].x, pts[j].z - pts[i].z); gmax = Math.max(gmax, Math.abs(h[j] - h[i]) / ds); }
   const sc = gmax > 0.12 ? 0.12 / gmax : 1;
-  // nyppylä: 1,4 m korkea, 22 m pitkä (90 km/h:ssa lento noin 1 s)
-  pts.forEach((p, i) => { const u = (p.s - sj) / 11; p.h = h[i] * sc + (Math.abs(u) < 1 ? 1.4 * (0.5 + 0.5 * Math.cos(u * Math.PI)) : 0); });
+  // nyppylä: 1,5 m korkea, 16 m pitkä (irtoaa noin 50 km/h:sta alkaen)
+  pts.forEach((p, i) => { const u = (p.s - sj) / 8; p.h = h[i] * sc + (Math.abs(u) < 1 ? 1.5 * (0.5 + 0.5 * Math.cos(u * Math.PI)) : 0); });
   // 2) maastoruudukko
   const dx = 4, x0 = -600, z0 = -680, nx = 301, nz = 281, H = new Float32Array(nx * nz), half = R.w / 2;
   for (let iz = 0; iz < nz; iz++) for (let ix = 0; ix < nx; ix++) {
@@ -9811,19 +9936,19 @@ function rallyVertical(S, dt, iHint) {
   const grade = clamp((gF - gR) / (2 * a), -0.7, 0.7), slopeV = grade * S.v;  // maan pystynopeus auton alla, kun auto seuraa pintaa
   if (S.y == null || !Number.isFinite(S.y)) { S.y = gC; S.vy = slopeV; R.air = false; }
   if (R.air) {
-    S.vy -= 9.8 * dt; S.y += S.vy * dt;
+    S.vy -= RG * dt; S.y += S.vy * dt;
     if (S.y <= gC) {
       const imp = slopeV - S.vy;  // kuinka kovaa maa tulee vastaan
       S.y = gC; S.vy = slopeV; R.air = false;
       if (imp > 3) { sfx.thud?.(); cam.shake = Math.max(cam.shake, Math.min(0.5, imp * 0.05)); }
-      if (imp > 7) { rallyDamage((imp - 7) * 3, S.px, S.pz, [0, 0], imp); msg('TÖMPS!', 'warn', 0.8); }
-      if (imp > 2.5) for (const w of car3d.wheels.slice(-2)) { const p = new THREE.Vector3(); w.getWorldPosition(p); for (let k = 0; k < 4; k++) puff(p, {color:R.surface === 'snow' ? 0xffffff : 0xd8ccb0, op:0.6, size:0.6, life:1.2, grow:3, v:new THREE.Vector3(rnd(-2, 2), rnd(0.5, 2), rnd(-2, 2)), drag:1.2}); }
+      if (imp > 8) { rallyDamage((imp - 8) * 2.5, S.px, S.pz, [0, 0], imp, true); msg('TÖMPS!', 'warn', 0.8); }
+      if (imp > 2.5) for (const w of car3d.wheels.filter(w => !w.userData.lost).slice(-2)) { const p = new THREE.Vector3(); w.getWorldPosition(p); for (let k = 0; k < 4; k++) puff(p, {color:R.surface === 'snow' ? 0xffffff : 0xd8ccb0, op:0.6, size:0.6, life:1.2, grow:3, v:new THREE.Vector3(rnd(-2, 2), rnd(0.5, 2), rnd(-2, 2)), drag:1.2}); }
     }
   } else {
     // irtoaminen: pinta kaartuu alas nopeammin kuin painovoima ehtii vetää (nyppylän harja kovassa vauhdissa).
     // Vertailu pinnan kaltevuudesta, ei korkeuserosta, joten pienet portaat eivät heitä autoa ilmaan.
     const prev = S.vy || 0;
-    if (Math.abs(S.v) > 7 && slopeV - prev < -9.8 * dt * 1.8 - 0.05 && prev > -1) { R.air = true; S.vy = prev - 9.8 * dt; S.y = Math.max(gC, S.y + prev * dt); R.airT0 = D.t; }
+    if (Math.abs(S.v) > 7 && slopeV - prev < -RG * dt * 1.3 - 0.05 && prev > -1) { R.air = true; S.vy = prev - RG * dt; S.y = Math.max(gC, S.y + prev * dt); R.airT0 = D.t; }
     else { S.y = gC; S.vy = slopeV; }
   }
   // kallistukset maastosta (ilmassa nokka seuraa lentorataa hitaasti)
@@ -9926,11 +10051,23 @@ function rallyFireCan() {
   const R = RALLY, D = DRV, S = D.S; if (!R.on || !R.can || R.wrecked || R.phase === 'count') return;
   const p = R.can, cy = Math.cos(S.yaw), sy = Math.sin(S.yaw); R.can = null;
   R.propG.attach(p.m); p.m.position.x += cy * 1.2; p.m.position.z -= sy * 1.2;
-  const sp = Math.max(0, S.v) + 30; p.v.set(cy * sp, 3.2, -sy * sp); p.w.set(rnd(-2, 2), rnd(-1, 1), rnd(-12, -8));
+  // automaattitähtäys: jos Seppo on edessä (±35°, alle 140 m), tähdätään ennakoituun paikkaan ja kaari lasketaan osumaan
+  const u = Math.max(0, S.v) + 32, lock = rallyLockOn(), x0 = p.m.position.x, z0 = p.m.position.z, y0 = p.m.position.y;
+  let dx = cy, dz = -sy, vy = 3.2;
+  if (lock) { const a = R.ai, [avx, avz] = raiVel(a); let t = lock.d / u, px = a.x, pz = a.z;
+    for (let k = 0; k < 3; k++) { px = a.x + avx * t; pz = a.z + avz * t; t = Math.hypot(px - x0, pz - z0) / u; }
+    const L = Math.hypot(px - x0, pz - z0) || 1; dx = (px - x0) / L; dz = (pz - z0) / L; vy = clamp((a.y + 0.7 - y0 + 0.5 * 14 * t * t) / Math.max(t, 0.05), -2, 12); p.homing = true; }
+  p.v.set(dx * u, vy, dz * u); p.w.set(rnd(-2, 2), rnd(-1, 1), rnd(-12, -8));
   p.active = true; p.awake = true; p.rest = 0; p.hit = true; p.hitT = D.t; p.shot = true;
   const mz = new THREE.Vector3(S.px + cy * 1.8, (S.y || 0) + car3d.axleY + car3d.def.height + 0.2, S.pz - sy * 1.8);
   for (let i = 0; i < 8; i++) puff(mz, {color:i % 2 ? 0x9ad7ff : 0xffffff, add:true, op:0.6, size:0.3, life:0.4, grow:2, v:new THREE.Vector3(cy * rnd(2, 6) + rnd(-1, 1), rnd(0, 1.5), -sy * rnd(2, 6) + rnd(-1, 1))});
   sfx.clank(); sfx.whoosh?.(); cam.shake = Math.max(cam.shake, 0.15); rallyWpnUI();
+}
+// Lukitus: Seppo edessä ±35° ja alle 140 m päässä
+function rallyLockOn() {
+  const R = RALLY, a = R.ai, S = DRV.S; if (!a) return null;
+  const dx = a.x - S.px, dz = a.z - S.pz, d = Math.hypot(dx, dz); if (d < 3 || d > 140) return null;
+  const c = (dx * Math.cos(S.yaw) - dz * Math.sin(S.yaw)) / d; return c > Math.cos(35 * Math.PI / 180) ? {d} : null;
 }
 function rallyWhistle(d) {
   const c = au(); if (!c) return; const t = c.currentTime, o = c.createOscillator(), g = c.createGain();
@@ -9942,6 +10079,9 @@ function rallyWhistle(d) {
 function rallyWpnStep(dt) {
   const R = RALLY, D = DRV, S = D.S; if (!R.slicks) return;
   const cy = Math.cos(S.yaw), sy = Math.sin(S.yaw);
+  // lukitusrengas Sepon päälle, kun tykki on ladattu ja Seppo on tähtäysalueella
+  const lk = $('rLock');
+  if (lk) { const lock = R.can && rallyLockOn(); if (lock) { _pv.set(R.ai.x, R.ai.y + 1.0, R.ai.z).project(camera); const vis = _pv.z < 1; if (vis) { lk.style.left = ((_pv.x + 1) / 2 * innerWidth) + 'px'; lk.style.top = ((1 - _pv.y) / 2 * innerHeight) + 'px'; } if (lk.hidden === vis) lk.hidden = !vis; } else if (!lk.hidden) lk.hidden = true; }
   R.onOil = false;
   for (const o of R.slicks) {
     if (o.t < 1) { o.t = Math.min(1, o.t + dt * 1.2); const k = 0.15 + 0.85 * sm01(o.t); o.m.scale.set(k, 1, k); }
@@ -9976,6 +10116,7 @@ function rallyWpnStep(dt) {
   }
 }
 Object.assign(window.__paja, {rallyGiveWpn, rallyUseWpn, rallyFireCan, rallyGroundAt});
+Object.assign(window.__paja, {rallyCanLoadT: p => rallyCanLoad(p), rallyLockOn});
 /* ==== src/p15_vastus.js ==== */
 /* ================= RALLI: vastustaja Sora-Seppo (demo 36) ================= */
 // Tekoäly ajaa radan keskiviivaa pitkin (etäisyys s) ja pitää oman ajolinjansa sivusuunnassa (lat). Nopeus tulee
@@ -9986,7 +10127,7 @@ const RAI_TARGET = {gravel:68, snow:82, asphalt:64};
 const RAI_CAR = {id:'seppo', car:{chassis:{id:'kupla', color:0xf2c12e}, engine:{id:'e20'}, gearbox:{id:'g5_perus'}, wheels:{id:'w_maasto'}, exhaust:{id:'ex_rst'}, seat:{id:'seat'}, steer:{id:'steer'}}};
 const RAI_NAME = 'Sora-Seppo', RAI_M = 1100;
 const RAI_LINES = {hit:['Hei! Maalit!', 'Ralli on herrasmiesten laji!', 'Näin ei Kupla-kerhossa tehdä!', 'Nyt meni hermo!'], oil:['Kuka laittoi voita tielle?!', 'Liukasta kuin saippua!'],
-  smoke:['En näe mitään!', 'Onko täällä sauna?'], shot:['Tynnyri?! Oikeasti?!', 'Ai! Mistä tuo tuli?'], pass:['Kupla ei petä!', 'Moro vaan!'], lose:['Hyvä ajo. Ensi kerralla!']};
+  smoke:['En näe mitään!', 'Onko täällä sauna?'], flat:['Rengas puhki! Kiitos vaan!', 'Piikit?! Tämä on herrasmiesralli!'], shot:['Tynnyri?! Oikeasti?!', 'Ai! Mistä tuo tuli?'], pass:['Kupla ei petä!', 'Moro vaan!'], lose:['Hyvä ajo. Ensi kerralla!']};
 function raiSay(k) { const R = RALLY, a = R.ai; if (!a || DRV.t - (a.sayT || -9) < 4) return; a.sayT = DRV.t; toast(`${RAI_NAME}: ${pickOne(RAI_LINES[k])}`); }
 // Nopeusprofiili: kaarre- ja jarrutusrajat, skaalataan tavoiteaikaan
 function raiProfile(surface) {
@@ -10031,8 +10172,8 @@ function raiPlace(a, dt) {
   // pystysuunta: tien pinta, nyppylän harjalla lento
   const h = p.h + (q.h - p.h) * t, slope = (q.h - p.h) / Math.max(seg, 1e-3), sv = slope * a.v;
   if (dt > 0) {
-    if (a.air) { a.vy -= 9.8 * dt; a.y += a.vy * dt; if (a.y <= h) { a.y = h; a.air = false; a.vy = sv; } }
-    else if (a.v > 7 && sv - a.vy < -9.8 * dt * 1.8 - 0.05 && a.vy > -1) { a.air = true; a.vy -= 9.8 * dt; a.y = Math.max(h, a.y + a.vy * dt); }
+    if (a.air) { a.vy -= RG * dt; a.y += a.vy * dt; if (a.y <= h) { a.y = h; a.air = false; a.vy = sv; } }
+    else if (a.v > 7 && sv - a.vy < -RG * dt * 1.3 - 0.05 && a.vy > -1) { a.air = true; a.vy -= RG * dt; a.y = Math.max(h, a.y + a.vy * dt); }
     else { a.y = h; a.vy = sv; }
   } else a.y = h;
   const root = a.c3.root; root.position.set(a.x, a.y + 0.04, a.z); root.rotation.order = 'YZX';
@@ -10055,6 +10196,7 @@ function raiStep(dt) {
   const gap = a.progA - a.progP;
   if (!window.RAI_NORB) vt *= gap > 120 ? 0.82 : gap > 60 ? 0.92 : gap < -150 ? 1.06 : 1;
   if (a.blindT > 0) { a.blindT -= dt; vt *= 0.55; }
+  if (a.flatT > 0) { a.flatT -= dt; vt *= 0.72; if (Math.random() < dt * a.v * 0.6) puff(new THREE.Vector3(a.x, a.y + 0.15, a.z), {color:0xffb040, add:true, op:0.9, size:0.07, life:0.3, grow:0.3, g:9, v:new THREE.Vector3(rnd(-2, 2), rnd(1, 3), rnd(-2, 2))}); }  // puhjennut rengas
   if (a.spinT > 0) { a.spinT -= dt; vt = Math.min(vt, 5); a.spin += a.spinDir * dt * 5 * Math.min(1, a.spinT); } else a.spin *= Math.max(0, 1 - dt * 3);
   if (a.fin != null && D.t - a.fin > 2) vt = 0;
   if (a.air) vt = a.v;
@@ -10087,10 +10229,12 @@ function raiHit(Jx, Jz, why) {
   const R = RALLY, a = R.ai, D = DRV; if (!a) return;
   const dvx = Jx / RAI_M, dvz = Jz / RAI_M, dv = Math.hypot(dvx, dvz), along = dvx * a.tx + dvz * a.tz, side = dvx * a.nx + dvz * a.nz;
   a.v = Math.max(0, a.v + along); a.latV += side;
-  if (dv > 3.5) { a.spinT = Math.min(1.6, 0.4 + dv * 0.12); a.spinDir = Math.sign(side || 1); }
+  if (dv > 3.5 || why === 'spike') { a.spinT = Math.min(1.6, 0.6 + dv * 0.12); a.spinDir = Math.sign(side || 1); }
+  if (why === 'spike' && !(a.flatT > 0)) { a.flatT = 10; rallyChaos(35, 'RENGAS PUHKI'); raiSay('flat'); }
   if (dv > 1.2 && D.t - a.hitT > 0.7) {
     a.hitT = D.t;
     if (why === 'shot') { rallyChaos(40, 'TÄYSOSUMA'); raiSay('shot'); }
+    else if (why === 'spike') { sfx.crunch(); }
     else { rallyChaos(Math.round(Math.min(40, 10 + dv * 4)), 'KOLHU'); if (dv > 3) raiSay('hit'); }
     sfx.crunch(); cam.shake = Math.max(cam.shake, Math.min(0.35, dv * 0.04));
   }
@@ -10113,7 +10257,7 @@ function raiProps(a) {
   }
 }
 // Pelaajan ja Sepon törmäys yhdelle pelaajan ympyrälle. Kutsutaan rallyCollidesta. Palauttaa impulssin pelaajaan tai null.
-function raiCollideCircle(cx, cz, rc, pvx, pvz) {
+function raiCollideCircle(cx, cz, rc, pvx, pvz, spike) {
   const R = RALLY, a = R.ai; if (!a || Math.abs((DRV.S.y || 0) - a.y) > 1.6) return null;
   const [avx, avz] = raiVel(a);
   for (const [ax, az] of raiCircles(a)) {
@@ -10123,7 +10267,7 @@ function raiCollideCircle(cx, cz, rc, pvx, pvz) {
     // erotetaan puoliksi: Seppo sivulle, pelaaja poispäin
     a.lat -= (nx * a.nx + nz * a.nz) * over * 0.5;
     const out = {px:nx * over * 0.5, pz:nz * over * 0.5, Jx:0, Jz:0};
-    if (vn < 0) { const J = -(1 + 0.25) * vn / (1 / DRV.P.m + 1 / RAI_M); out.Jx = nx * J; out.Jz = nz * J; raiHit(-nx * J, -nz * J); }
+    if (vn < 0) { const J = -(1 + 0.25) * vn / (1 / DRV.P.m + 1 / RAI_M); out.Jx = nx * J; out.Jz = nz * J; const k = spike ? 1.4 : 1; raiHit(-nx * J * k, -nz * J * k, spike && -vn > 1.5 ? 'spike' : null); }
     return out;
   }
   return null;
@@ -10134,11 +10278,13 @@ function raiWeapons(dt) {
   for (const o of R.slicks || []) if (Math.hypot(a.x - o.x, a.z - o.z) < o.r * (0.15 + 0.85 * o.t) && D.t - (o.aiT ?? -9) > 3 && !a.air) {
     o.aiT = D.t; a.spinT = 1.8; a.spinDir = Math.random() < 0.5 ? -1 : 1; a.v *= 0.6; rallyChaos(30, 'SEPPO LIUKUU'); raiSay('oil'); }
   for (const z of R.smokeZ || []) if (D.t - z.t < 7 && Math.hypot(a.x - z.x, a.z - z.z) < 6) { if (a.blindT <= 0 && D.t - a.smokeHitT > 4) { a.smokeHitT = D.t; rallyChaos(20, 'SEPPO SOKKONA'); raiSay('smoke'); } a.blindT = 1.2; break; }
-  // nopeat kappaleet (tykin tynnyri, lentävä paali)
+  // nopeat kappaleet (tykin tynnyri, lentävä paali). Tykin ammus hakeutuu kohti Seppoa kolmen sekunnin ajan.
   for (const p of R.props || []) {
     if (!p.awake || !p.active) continue; const sp = Math.hypot(p.v.x, p.v.z); if (sp < 7) continue;
-    for (const [ax, az] of raiCircles(a)) { const d = Math.hypot(p.m.position.x - ax, p.m.position.z - az); if (d < 1.0 + p.r && Math.abs(p.m.position.y - a.y - 0.6) < 1.4) {
-      raiHit(p.v.x * p.mass * 0.9, p.v.z * p.mass * 0.9, p.shot ? 'shot' : 'hit'); p.v.multiplyScalar(-0.25); p.shot = false; break; } }
+    if (p.homing && D.t - p.hitT < 3) { const dx = a.x - p.m.position.x, dz = a.z - p.m.position.z, want = Math.atan2(dz, dx), cur = Math.atan2(p.v.z, p.v.x); let e = want - cur; e = Math.atan2(Math.sin(e), Math.cos(e)); const t = cur + clamp(e, -2.5 * dt, 2.5 * dt); p.v.x = Math.cos(t) * sp; p.v.z = Math.sin(t) * sp; }
+    const hr = p.shot ? 1.5 : 1.0;
+    for (const [ax, az] of raiCircles(a)) { const d = Math.hypot(p.m.position.x - ax, p.m.position.z - az); if (d < hr + p.r && Math.abs(p.m.position.y - a.y - 0.6) < 1.6) {
+      raiHit(p.v.x * p.mass * 0.9, p.v.z * p.mass * 0.9, p.shot ? 'shot' : 'hit'); p.v.multiplyScalar(-0.25); p.shot = false; p.homing = false; break; } }
   }
 }
 Object.assign(window.__paja, {raiStart, raiStop, raiHit});
@@ -10378,6 +10524,18 @@ jarru kuten ennen, automaattivaihteisto `rallyAutoShift`. Radan ulkopuolella pit
 päässä penkka. `rallyReset` (↻ Radalle) palauttaa radalle. Kierrosajat `state.rally.best[alusta]`. `surfaceOf` lukee
 rallin pinnan. Testi: `tools/t13.py <gravel|snow|asphalt>` (yksinkertainen linjanseuraaja ajaa radan).
 
+## Demo 38 (ralli, vain testiversio)
+- Rallivarusteet Lisäosat-hyllyyn (vain testiversio, window.MN_TEST): Piikkipuskuri (35 kg, 600 €), Panssarilevyt (60 kg, vauriot −25 %), Raskas panssari (150 kg, −45 %), Tankkipanssari (260 kg, −60 %). Uudet paikat 'bumper' ja 'armor'; malli sovitetaan rungon mittoihin. Paino hidastaa myös kiihdytyksissä.
+- Piikkipuskuri: keulaosuma Seppoon puhkaisee renkaan (10 s, nopeus −28 %, kipinät) ja pyöräyttää, esteet hajoavat puolella voimalla, omat vauriot keulasta −40 %.
+- Magneettitykki: automaattitähtäys, kun Seppo on edessä ±35° ja alle 140 m (ennakoitu paikka, kaari lasketaan), ammus hakeutuu kohti 3 s, osumasäde isompi. Lukitusrengas "LUKITTU" Sepon päällä, kun tykki on ladattu. Testissä 7/8 osumaa 25–60 m:stä.
+- test.html saa window.MN_TEST = true (kuten julkaistu testiversio).
+
+## Demo 37 (ralli, vain testiversio)
+- Ilmalennon painovoima 19,6 m/s² (RG) autolle ja Sepolle, kappaleille 14 m/s²: hypyt napakampia, ei leijailua. Hyppyri jyrkemmäksi (1,5 m / 16 m), irtoaa noin 50 km/h:sta.
+- Kestävyys rungon mukaan (RALLY_DUR, esim. Kupla 0,7, Hiekkis 0,85, Lava-Lasse 1,15, Monsteri 1,5) × renkaiden kunto. Vauriot jaetaan kestävyydellä.
+- Iskussa (dv > 5 × kestävyys) rungosta irtoaa 1–2 pientä palaa osumakohdasta. Kova isku (dv > 11 × kestävyys) tai yli 55 % vauriot irrottaa lähimmän pyörän (enintään 2): pyörä vierii omia teitään, kulma roikkuu ja raapii (kipinät), pito laskee, auto vetää sivulle. Irronnut pakoputki: suora ääni.
+- Ratti nopeampi: täysi kääntö 85° (oli 110°), renkaiden kääntyminen nopeampi.
+
 ## Demo 36 (ralli, vain testiversio)
 - Korjattu pomppu nurmelta tielle: tien ja maaston korkeus liukuu pientareen reunalla, ja ilmaan irtoaminen päätellään pinnan kaltevuuden muutoksesta (ei korkeusporrasta).
 - Korjattu "vihreä kerros": ulkoalueen taso oli koko kentän päällä 5 m:n korkeudella ja näkyi ylhäältä. Nyt neljä tasoa vain maastoruudukon ympärillä. Kamera nousee, jos mäki on auton ja kameran välissä.
@@ -10434,7 +10592,7 @@ BASE="p2_models.js p3_scene.js p4_ui.js p5_drag.js p6_kisa.js p7_tuho.js p8_maai
 assemble papun-paja.html $BASE
 assemble papun-paja-raw-testi.html $BASE p12_ralli.js p13_maasto.js p14_ase.js p15_vastus.js
 # test.html = testiversio paikallisella three.js:llä (Playwright-testit)
-{ echo '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light}body{margin:0;font:14px system-ui}[hidden]{display:none!important}</style></head><body>'; cat papun-paja-raw-testi.html; echo '</body></html>'; } > test.html
+{ echo '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light}body{margin:0;font:14px system-ui}[hidden]{display:none!important}</style><script>window.MN_TEST=true</script></head><body>'; cat papun-paja-raw-testi.html; echo '</body></html>'; } > test.html
 wc -c papun-paja.html
 sed -i 's#https://cdn.jsdelivr.net/npm/three@0.160.0/#./node_modules/three/#g' test.html
 { echo '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light}body{margin:0;font:14px system-ui}[hidden]{display:none!important}</style></head><body>'; cat papun-paja.html; echo '</body></html>'; } > test_main.html
